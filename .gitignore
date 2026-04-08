@@ -1,0 +1,8 @@
+local.settings.json
+.env
+*.pyc
+__pycache__/
+.python_packages/
+bin/
+obj/
+.vscode/
