@@ -1,0 +1,18 @@
+{
+  "bindings": [
+    {
+      "name": "Timer",
+      "type": "timerTrigger",
+      "direction": "in",
+      "schedule": "0 0 2 * * *",
+      "runOnStartup": false
+    },
+    {
+      "name": "outputQueue",
+      "type": "queue",
+      "direction": "out",
+      "queueName": "pdf-compress-queue",
+      "connection": "AzureWebJobsStorage"
+    }
+  ]
+}

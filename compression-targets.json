@@ -1,0 +1,8 @@
+[
+  {
+    "enabled": false,
+    "siteUrl": "https://streamflogroup.sharepoint.com/sites/yoursite",
+    "libraryName": "Documents",
+    "notes": "Example - update siteUrl and libraryName, set enabled to true to process"
+  }
+]
