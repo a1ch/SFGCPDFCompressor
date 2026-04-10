@@ -2,21 +2,15 @@ param($Timer, $outputQueue)
 
 # ============================================================
 # EnqueuePDFs - Timer Trigger
-# Reads a SharePoint list ("PDF Compression Targets") to find
-# which sites/libraries to process tonight.
-# Enqueues files as it pages through SharePoint so it never
-# times out on large libraries.
-#
-# Required App Settings:
-#   TENANT_ID, CLIENT_ID, CLIENT_SECRET
-#   CONFIG_SITE_URL      - site hosting the targets list
-#   CONFIG_LIST_NAME     - list name (default: "PDF Compression Targets")
-#   TEST_MODE            - "true" to limit files per library
-#   TEST_LIMIT           - max files per library in test mode
-#   MIN_SIZE_MB          - global default minimum file size
+# Reads a SharePoint list ("SFGCFMCompressor") to find which
+# sites/libraries to process tonight.
+# After scanning each library, writes LastCompressed back to
+# the control list row.
+# Sends a summary email via Graph API when done.
 # ============================================================
 
 Import-Module "$PSScriptRoot\..\shared\SharePoint-Helpers.psm1"
+Import-Module "$PSScriptRoot\..\shared\Graph-Helpers.psm1"
 
 $tenantId     = $env:TENANT_ID
 $clientId     = $env:CLIENT_ID
@@ -26,12 +20,16 @@ $testLimit    = [int]($env:TEST_LIMIT ?? "5")
 $globalMinMB  = [double]($env:MIN_SIZE_MB ?? "5")
 
 $configSiteUrl  = $env:CONFIG_SITE_URL
-$configListName = $env:CONFIG_LIST_NAME ?? "PDF Compression Targets"
+$configListName = $env:CONFIG_LIST_NAME ?? "SFGCFMCompressor"
+$summaryTo      = $env:SUMMARY_EMAIL_TO ?? "sstubbs@streamflo.com"
+$summaryFrom    = $env:SUMMARY_EMAIL_FROM ?? "sstubbs@streamflo.com"
 
 if (-not $configSiteUrl) {
-    Write-Error "❌ CONFIG_SITE_URL app setting is not set."
+    Write-Error "CONFIG_SITE_URL app setting is not set."
     throw "Missing CONFIG_SITE_URL"
 }
+
+$runDate = (Get-Date).ToString("dddd, MMMM d, yyyy 'at' h:mm tt")
 
 Write-Host "========================================"
 Write-Host "EnqueuePDFs starting"
@@ -39,14 +37,15 @@ Write-Host "Config site:  $configSiteUrl"
 Write-Host "Config list:  $configListName"
 Write-Host "Test Mode:    $testMode (limit: $testLimit per library)"
 Write-Host "Global Min:   $globalMinMB MB"
+Write-Host "Run date:     $runDate"
 Write-Host "========================================"
 
-# --- Authenticate ---
+# --- Authenticate to SharePoint ---
 try {
     $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
-    Write-Host "✅ Authenticated to SharePoint"
+    Write-Host "Authenticated to SharePoint"
 } catch {
-    Write-Error "❌ Authentication failed: $_"
+    Write-Error "Authentication failed: $_"
     throw
 }
 
@@ -65,37 +64,38 @@ try {
     $configResponse = Invoke-RestMethod -Uri $configUri -Headers $headers -Method GET
     $targets = $configResponse.d.results
 } catch {
-    Write-Error "❌ Failed to read config list '$configListName' from $configSiteUrl`: $_"
+    Write-Error "Failed to read config list '$configListName' from $configSiteUrl`: $_"
     throw
 }
 
-Write-Host "✅ Found $($targets.Count) enabled target(s)"
+Write-Host "Found $($targets.Count) enabled target(s)"
 
 if ($targets.Count -eq 0) {
-    Write-Host "⚠️  No enabled targets in '$configListName' — nothing to do."
+    Write-Host "No enabled targets - nothing to do."
     return
 }
 
 # --- Process each target ---
-$totalQueued = 0
+$totalQueued    = 0
+$targetSummaries = @()
 
 foreach ($target in $targets) {
     $siteUrl     = $target.SiteUrl.Trim()
     $libraryName = $target.LibraryName.Trim()
     $label       = $target.Title
+    $itemId      = $target.Id
     $minSizeMB   = if ($target.MinSizeMB -and $target.MinSizeMB -gt 0) { $target.MinSizeMB } else { $globalMinMB }
     $minSizeBytes = [long]($minSizeMB * 1MB)
 
     Write-Host ""
     Write-Host "--- [$label] $siteUrl / $libraryName (min: $minSizeMB MB) ---"
 
-    # Authenticate with target site if different from config site
     $siteToken = $accessToken
     if ($siteUrl.TrimEnd('/') -ne $configSiteUrl.TrimEnd('/')) {
         try {
             $siteToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret -ResourceHost ([Uri]$siteUrl).Host
         } catch {
-            Write-Warning "  ⚠️  Could not get token for $siteUrl — trying with config site token"
+            Write-Warning "  Could not get token for $siteUrl - trying with config site token"
             $siteToken = $accessToken
         }
     }
@@ -136,26 +136,61 @@ foreach ($target in $targets) {
                 $targetCount++
 
                 if ($testMode -and $targetCount -ge $testLimit) {
-                    Write-Host "  🧪 TEST MODE: Reached limit of $testLimit files for this library"
+                    Write-Host "  TEST MODE: Reached limit of $testLimit files for this library"
                     $uri = $null
                     break
                 }
             }
 
-            Write-Host "  📄 Page $pageCount — queued $targetCount so far..."
+            Write-Host "  Page $pageCount - queued $targetCount so far..."
             $uri = $response.d.__next
 
         } while ($uri)
 
-        Write-Host "  ✅ Done — enqueued $targetCount file(s) across $pageCount page(s)"
+        Write-Host "  Done - enqueued $targetCount file(s) across $pageCount page(s)"
+
+        # Write LastCompressed back to the control list row
+        Update-TargetLastCompressed `
+            -SiteUrl   $configSiteUrl `
+            -ListName  $configListName `
+            -AccessToken $accessToken `
+            -ItemId    $itemId
+
+        # Accumulate for summary email
+        $targetSummaries += @{
+            Label       = $label
+            SiteUrl     = $siteUrl
+            LibraryName = $libraryName
+            Count       = $targetCount
+        }
 
     } catch {
-        Write-Warning "  ❌ Failed for [$label] $siteUrl / $libraryName`: $_"
-        # Continue with next target rather than failing the whole run
+        Write-Warning "  Failed for [$label] $siteUrl / $libraryName`: $_"
     }
 }
 
 Write-Host ""
 Write-Host "========================================"
-Write-Host "✅ Total enqueued: $totalQueued files across $($targets.Count) target(s)"
+Write-Host "Total enqueued: $totalQueued files across $($targets.Count) target(s)"
 Write-Host "========================================"
+
+# --- Send summary email ---
+try {
+    $graphToken = Get-GraphAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+    $htmlBody   = Build-SummaryEmailHtml `
+                    -TotalTargets    $targets.Count `
+                    -TotalQueued     $totalQueued `
+                    -TargetSummaries $targetSummaries `
+                    -RunDate         $runDate
+
+    Send-SummaryEmail `
+        -GraphToken  $graphToken `
+        -FromAddress $summaryFrom `
+        -ToAddress   $summaryTo `
+        -Subject     "PDF Compressor - Nightly Run $((Get-Date).ToString('yyyy-MM-dd')) - $totalQueued files queued" `
+        -HtmlBody    $htmlBody
+
+} catch {
+    Write-Warning "Could not send summary email: $_"
+    # Non-fatal - don't throw, the queue work is already done
+}

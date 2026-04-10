@@ -79,7 +79,6 @@ function Get-FileMetadata {
     $uri      = "$SiteUrl/_api/web/lists/getbytitle('$LibraryName')/items($FileId)"
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
 
-    # Filter out read-only system fields
     $skipFields = @(
         "ID", "Id", "GUID", "Created", "Modified", "Author", "Editor",
         "FileRef", "FileDirRef", "FileLeafRef", "FSObjType", "ContentTypeId",
@@ -119,11 +118,10 @@ function Set-FileMetadata {
     )
 
     if ($Metadata.Count -eq 0) {
-        Write-Host "  ⚠️  No metadata to restore"
+        Write-Host "  No metadata to restore"
         return
     }
 
-    # Build list item type name from library name (spaces replaced with _x0020_)
     $listItemType = "SP.Data." + ($LibraryName -replace " ", "_x0020_") + "Item"
 
     $headers = @{
@@ -178,22 +176,19 @@ function Remove-OldFileVersions {
         [string]$SiteUrl,
         [string]$ServerRelativeUrl,
         [string]$AccessToken,
-        [int]$KeepVersions = 1  # Keep only the current version by default
+        [int]$KeepVersions = 1
     )
 
-    $headers = @{ Authorization = "Bearer $AccessToken"; Accept = "application/json;odata=verbose" }
-
-    # Get all versions of the file
+    $headers  = @{ Authorization = "Bearer $AccessToken"; Accept = "application/json;odata=verbose" }
     $uri      = "$SiteUrl/_api/web/getfilebyserverrelativeurl('$([Uri]::EscapeDataString($ServerRelativeUrl))')/versions"
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
     $versions = $response.d.results
 
     if ($versions.Count -le $KeepVersions) {
-        Write-Host "  📋 Only $($versions.Count) version(s) — nothing to clean up"
+        Write-Host "  Only $($versions.Count) version(s) - nothing to clean up"
         return
     }
 
-    # Sort by version label descending, skip the ones we want to keep, delete the rest
     $toDelete = $versions | Sort-Object { [double]$_.VersionLabel } -Descending | Select-Object -Skip $KeepVersions
 
     foreach ($version in $toDelete) {
@@ -212,7 +207,82 @@ function Remove-OldFileVersions {
         }
     }
 
-    Write-Host "  🗑️  Deleted $($toDelete.Count) old version(s), kept $KeepVersions"
+    Write-Host "  Deleted $($toDelete.Count) old version(s), kept $KeepVersions"
+}
+
+function Write-LogEntry {
+    param(
+        [string]$SiteUrl,
+        [string]$ListName = "SFGCFMCompressorLog",
+        [string]$AccessToken,
+        [string]$FileName,
+        [string]$FileSiteUrl,
+        [string]$LibraryName,
+        [double]$OriginalSizeMB,
+        [double]$CompressedSizeMB,
+        [double]$SavedMB,
+        [int]$SavingsPct
+    )
+
+    $listItemType = "SP.Data." + ($ListName -replace " ", "_x0020_") + "Item"
+
+    $headers = @{
+        Authorization  = "Bearer $AccessToken"
+        Accept         = "application/json;odata=verbose"
+        "Content-Type" = "application/json;odata=verbose"
+    }
+
+    $body = @{
+        "__metadata"       = @{ "type" = $listItemType }
+        "Title"            = $FileName
+        "SiteUrl"          = $FileSiteUrl
+        "LibraryName"      = $LibraryName
+        "OriginalSizeMB"   = $OriginalSizeMB
+        "CompressedSizeMB" = $CompressedSizeMB
+        "SavedMB"          = $SavedMB
+        "SavingsPct"       = $SavingsPct
+        "ProcessedDate"    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    } | ConvertTo-Json -Depth 4
+
+    $uri = "$SiteUrl/_api/web/lists/getbytitle('$ListName')/items"
+    try {
+        Invoke-RestMethod -Uri $uri -Headers $headers -Method POST -Body $body | Out-Null
+        Write-Host "  Log entry written for $FileName"
+    } catch {
+        Write-Warning "  Could not write log entry for $FileName`: $_"
+    }
+}
+
+function Update-TargetLastCompressed {
+    param(
+        [string]$SiteUrl,
+        [string]$ListName = "SFGCFMCompressor",
+        [string]$AccessToken,
+        [int]$ItemId
+    )
+
+    $listItemType = "SP.Data." + ($ListName -replace " ", "_x0020_") + "Item"
+
+    $headers = @{
+        Authorization   = "Bearer $AccessToken"
+        Accept          = "application/json;odata=verbose"
+        "Content-Type"  = "application/json;odata=verbose"
+        "X-HTTP-Method" = "MERGE"
+        "IF-MATCH"      = "*"
+    }
+
+    $body = @{
+        "__metadata"     = @{ "type" = $listItemType }
+        "LastCompressed" = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    } | ConvertTo-Json -Depth 3
+
+    $uri = "$SiteUrl/_api/web/lists/getbytitle('$ListName')/items($ItemId)"
+    try {
+        Invoke-RestMethod -Uri $uri -Headers $headers -Method POST -Body $body | Out-Null
+        Write-Host "  LastCompressed updated for item $ItemId"
+    } catch {
+        Write-Warning "  Could not update LastCompressed for item $ItemId`: $_"
+    }
 }
 
 Export-ModuleMember -Function *
