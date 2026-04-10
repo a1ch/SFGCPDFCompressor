@@ -5,14 +5,15 @@ function Get-SharePointAccessToken {
     param(
         [string]$TenantId,
         [string]$ClientId,
-        [string]$ClientSecret
+        [string]$ClientSecret,
+        [string]$ResourceHost = $env:SHAREPOINT_HOST  # Override for cross-site-collection calls
     )
 
     $body = @{
         grant_type    = "client_credentials"
         client_id     = "$ClientId@$TenantId"
         client_secret = $ClientSecret
-        resource      = "00000003-0000-0ff1-ce00-000000000000/$($env:SHAREPOINT_HOST)@$TenantId"
+        resource      = "00000003-0000-0ff1-ce00-000000000000/$ResourceHost@$TenantId"
     }
 
     $response = Invoke-RestMethod `
