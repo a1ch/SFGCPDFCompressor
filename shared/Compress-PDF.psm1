@@ -1,6 +1,5 @@
 # Compress-PDF.psm1
 # Handles PDF compression using Ghostscript (Windows)
-# Achieves ~60-80% size reduction on scanned PDFs
 
 function Compress-PDFFile {
     param(
@@ -9,10 +8,9 @@ function Compress-PDFFile {
         [string]$Quality = "ebook"   # screen=72dpi, ebook=150dpi, printer=300dpi
     )
 
-    # Find Ghostscript executable
     $gsPath = Find-Ghostscript
     if (-not $gsPath) {
-        throw "Ghostscript not found. Install it or check PATH."
+        throw "Ghostscript not found. Ensure profile.ps1 ran successfully."
     }
 
     Write-Host "  Using Ghostscript: $gsPath"
@@ -46,52 +44,25 @@ function Compress-PDFFile {
 }
 
 function Find-Ghostscript {
-    # Check common install paths on Windows
-    $candidates = @(
-        "gswin64c.exe",
-        "gswin32c.exe",
-        "gs"
-    )
+    # Check C:\home\gs first (our install location)
+    $homeGs = Get-ChildItem -Path "C:\home\gs" -Recurse -Filter "gswin64c.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($homeGs) { return $homeGs.FullName }
 
-    # Check PATH first
-    foreach ($name in $candidates) {
+    # Check PATH
+    foreach ($name in @("gswin64c.exe", "gswin32c.exe", "gs")) {
         $found = Get-Command $name -ErrorAction SilentlyContinue
         if ($found) { return $found.Source }
     }
 
     # Check common install directories
-    $dirs = @(
-        "C:\Program Files\gs",
-        "C:\Program Files (x86)\gs"
-    )
-
-    foreach ($dir in $dirs) {
+    foreach ($dir in @("C:\Program Files\gs", "C:\Program Files (x86)\gs")) {
         if (Test-Path $dir) {
             $exe = Get-ChildItem -Path $dir -Recurse -Filter "gswin64c.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($exe) { return $exe.FullName }
-            $exe = Get-ChildItem -Path $dir -Recurse -Filter "gswin32c.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($exe) { return $exe.FullName }
         }
     }
 
     return $null
-}
-
-function Install-Ghostscript {
-    Write-Host "Installing Ghostscript via winget..."
-    try {
-        $proc = Start-Process -FilePath "winget" -ArgumentList "install", "--id", "ArtifexSoftware.GhostScript", "--silent", "--accept-package-agreements", "--accept-source-agreements" -Wait -PassThru -NoNewWindow
-        if ($proc.ExitCode -eq 0) {
-            Write-Host "Ghostscript installed successfully"
-            return $true
-        } else {
-            Write-Warning "winget install failed with exit code $($proc.ExitCode)"
-            return $false
-        }
-    } catch {
-        Write-Warning "Could not install Ghostscript: $_"
-        return $false
-    }
 }
 
 Export-ModuleMember -Function *
