@@ -9,6 +9,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+  AZURE_FUNCTIONAPP_NAME: 'sfgcpdfcompressor2'
 
 jobs:
   deploy:
@@ -21,7 +22,7 @@ jobs:
       - name: 'Run Azure Functions Action'
         uses: Azure/functions-action@v1
         with:
-          app-name: 'sfgcpdfcompressor2'
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_2 }}
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
