@@ -1,4 +1,4 @@
-param($Timer, $outputQueue)
+param($Timer)
 
 # ============================================================
 # EnqueuePDFs - Timer Trigger
@@ -76,15 +76,15 @@ if ($targets.Count -eq 0) {
 }
 
 # --- Process each target ---
-$totalQueued    = 0
+$totalQueued     = 0
 $targetSummaries = @()
 
 foreach ($target in $targets) {
-    $siteUrl     = $target.SiteUrl.Trim()
-    $libraryName = $target.LibraryName.Trim()
-    $label       = $target.Title
-    $itemId      = $target.Id
-    $minSizeMB   = if ($target.MinSizeMB -and $target.MinSizeMB -gt 0) { $target.MinSizeMB } else { $globalMinMB }
+    $siteUrl      = $target.SiteUrl.Trim()
+    $libraryName  = $target.LibraryName.Trim()
+    $label        = $target.Title
+    $itemId       = $target.Id
+    $minSizeMB    = if ($target.MinSizeMB -and $target.MinSizeMB -gt 0) { $target.MinSizeMB } else { $globalMinMB }
     $minSizeBytes = [long]($minSizeMB * 1MB)
 
     Write-Host ""
@@ -131,7 +131,8 @@ foreach ($target in $targets) {
                     LibraryName       = $libraryName
                 } | ConvertTo-Json -Compress
 
-                $outputQueue.Add($message)
+                Push-OutputBinding -Name outputQueue -Value $message
+
                 $totalQueued++
                 $targetCount++
 
@@ -149,14 +150,12 @@ foreach ($target in $targets) {
 
         Write-Host "  Done - enqueued $targetCount file(s) across $pageCount page(s)"
 
-        # Write LastCompressed back to the control list row
         Update-TargetLastCompressed `
-            -SiteUrl   $configSiteUrl `
-            -ListName  $configListName `
+            -SiteUrl     $configSiteUrl `
+            -ListName    $configListName `
             -AccessToken $accessToken `
-            -ItemId    $itemId
+            -ItemId      $itemId
 
-        # Accumulate for summary email
         $targetSummaries += @{
             Label       = $label
             SiteUrl     = $siteUrl
@@ -192,5 +191,4 @@ try {
 
 } catch {
     Write-Warning "Could not send summary email: $_"
-    # Non-fatal - don't throw, the queue work is already done
 }
