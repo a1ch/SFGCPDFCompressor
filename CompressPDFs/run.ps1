@@ -9,7 +9,6 @@ param($QueueItem)
 
 Import-Module "$PSScriptRoot\..\shared\Compress-PDF.psm1"
 Import-Module "$PSScriptRoot\..\shared\SharePoint-Helpers.psm1"
-Import-Module "$PSScriptRoot\..\shared\Blob-Helpers.psm1"
 
 $tenantId     = $env:TENANT_ID
 $clientId     = $env:CLIENT_ID
@@ -18,8 +17,21 @@ $logSiteUrl   = $env:CONFIG_SITE_URL
 $logListName  = $env:LOG_LIST_NAME ?? "SFGCFMCompressorLog"
 $keepVersions = [int]($env:KEEP_VERSIONS ?? "1")
 
-# Parse queue message
-$file           = $QueueItem | ConvertFrom-Json
+# Parse queue message - Azure may base64 encode it
+$rawMessage = $QueueItem
+try {
+    $file = $rawMessage | ConvertFrom-Json
+} catch {
+    # Try base64 decode
+    try {
+        $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($rawMessage))
+        $file = $decoded | ConvertFrom-Json
+    } catch {
+        Write-Error "Could not parse queue message: $rawMessage"
+        throw
+    }
+}
+
 $fileName       = $file.Name
 $driveItemId    = $file.DriveItemId
 $driveId        = $file.DriveId
@@ -35,24 +47,15 @@ Write-Host "Library:    $libraryName"
 Write-Host "========================================"
 
 try {
-    $blobCtx = Ensure-BlobContainer -ContainerName "pdf-processing-temp"
-} catch {
-    Write-Error "Blob storage setup failed: $_"
-    throw
-}
-
-try {
     $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
 } catch {
     Write-Error "Authentication failed: $_"
     throw
 }
 
-$inputBlobName  = "$driveItemId`_input.pdf"
-$outputBlobName = "$driveItemId`_output.pdf"
-$tempDir        = [System.IO.Path]::GetTempPath()
-$tempInput      = Join-Path $tempDir $inputBlobName
-$tempOutput     = Join-Path $tempDir $outputBlobName
+$tempDir    = [System.IO.Path]::GetTempPath()
+$tempInput  = Join-Path $tempDir "$driveItemId`_input.pdf"
+$tempOutput = Join-Path $tempDir "$driveItemId`_output.pdf"
 
 try {
     # 1. Download from SharePoint via Graph
@@ -60,14 +63,11 @@ try {
     Download-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                             -DestinationPath $tempInput -AccessToken $accessToken
 
-    # Stage in blob storage
-    Write-Host "Staging in blob storage..."
-    Upload-ToBlob -FilePath $tempInput -BlobName $inputBlobName -StorageContext $blobCtx
-    Remove-Item $tempInput -Force
+    $downloadedSize = (Get-Item $tempInput).Length
+    Write-Host "Downloaded: $([math]::Round($downloadedSize / 1MB, 2)) MB"
 
     # 2. Compress
     Write-Host "Compressing..."
-    Download-FromBlob -BlobName $inputBlobName -DestinationPath $tempInput -StorageContext $blobCtx
     Compress-PDFFile -InputPath $tempInput -OutputPath $tempOutput | Out-Null
 
     $newSizeMB = [math]::Round((Get-Item $tempOutput).Length / 1MB, 2)
@@ -111,6 +111,4 @@ try {
 } finally {
     if (Test-Path $tempInput)  { Remove-Item $tempInput  -Force -ErrorAction SilentlyContinue }
     if (Test-Path $tempOutput) { Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue }
-    Delete-Blob -BlobName $inputBlobName  -StorageContext $blobCtx
-    Delete-Blob -BlobName $outputBlobName -StorageContext $blobCtx
 }
