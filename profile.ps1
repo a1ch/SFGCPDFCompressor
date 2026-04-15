@@ -1,16 +1,25 @@
 # profile.ps1 - runs on Function App startup
+# Ensures Ghostscript is installed for PDF compression
 
-# Install Python dependencies needed for PDF compression
-Write-Host "Checking Python dependencies for PDF compression..."
-try {
-    $check = & python3 -c "import pikepdf, PIL" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Installing pikepdf and Pillow..."
-        & pip3 install pikepdf Pillow --quiet --break-system-packages
-        Write-Host "✅ Python dependencies installed"
+Import-Module "$PSScriptRoot\shared\Compress-PDF.psm1"
+
+Write-Host "Checking Ghostscript..."
+$gsPath = Find-Ghostscript
+if (-not $gsPath) {
+    Write-Host "Ghostscript not found - installing..."
+    $installed = Install-Ghostscript
+    if ($installed) {
+        # Refresh PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        $gsPath = Find-Ghostscript
+        if ($gsPath) {
+            Write-Host "Ghostscript ready at: $gsPath"
+        } else {
+            Write-Warning "Ghostscript installed but not found in PATH yet - may need restart"
+        }
     } else {
-        Write-Host "✅ Python dependencies already available"
+        Write-Warning "Could not install Ghostscript - compression will fail"
     }
-} catch {
-    Write-Warning "Could not verify Python dependencies: $_"
+} else {
+    Write-Host "Ghostscript ready at: $gsPath"
 }
