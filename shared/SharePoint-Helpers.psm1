@@ -6,18 +6,19 @@ function Get-SharePointAccessToken {
         [string]$TenantId,
         [string]$ClientId,
         [string]$ClientSecret,
-        [string]$ResourceHost = $env:SHAREPOINT_HOST  # Override for cross-site-collection calls
+        [string]$ResourceHost = $null  # Kept for backward compat but no longer used
     )
 
+    # Use Azure AD OAuth2 with Graph scope (requires Sites.ReadWrite.All app permission)
     $body = @{
         grant_type    = "client_credentials"
-        client_id     = "$ClientId@$TenantId"
+        client_id     = $ClientId
         client_secret = $ClientSecret
-        resource      = "00000003-0000-0ff1-ce00-000000000000/$ResourceHost@$TenantId"
+        scope         = "https://graph.microsoft.com/.default"
     }
 
     $response = Invoke-RestMethod `
-        -Uri "https://accounts.accesscontrol.windows.net/$TenantId/tokens/OAuth/2" `
+        -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
         -Method POST `
         -Body $body `
         -ContentType "application/x-www-form-urlencoded"
