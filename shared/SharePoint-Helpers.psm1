@@ -6,15 +6,15 @@ function Get-SharePointAccessToken {
         [string]$TenantId,
         [string]$ClientId,
         [string]$ClientSecret,
-        [string]$ResourceHost = $null  # Kept for backward compat but no longer used
+        [string]$ResourceHost = "streamflogroup.sharepoint.com"
     )
 
-    # Use Azure AD OAuth2 with Graph scope (requires Sites.ReadWrite.All app permission)
+    # Use SharePoint-specific scope so the token is accepted by the SharePoint REST API
     $body = @{
         grant_type    = "client_credentials"
         client_id     = $ClientId
         client_secret = $ClientSecret
-        scope         = "https://graph.microsoft.com/.default"
+        scope         = "https://$ResourceHost/.default"
     }
 
     $response = Invoke-RestMethod `
