@@ -16,12 +16,14 @@ $clientId     = $env:CLIENT_ID
 $clientSecret = $env:CLIENT_SECRET
 $logSiteUrl   = $env:CONFIG_SITE_URL
 $logListName  = $env:LOG_LIST_NAME ?? "SFGCFMCompressorLog"
+$keepVersions = [int]($env:KEEP_VERSIONS ?? "1")
 
 # Parse queue message
 $file           = $QueueItem | ConvertFrom-Json
 $fileName       = $file.Name
-$fileId         = $file.Id
-$serverPath     = $file.ServerRelativeUrl
+$driveItemId    = $file.DriveItemId
+$driveId        = $file.DriveId
+$siteId         = $file.SiteId
 $originalSizeMB = $file.SizeMB
 $siteUrl        = $file.SiteUrl
 $libraryName    = $file.LibraryName
@@ -40,29 +42,22 @@ try {
 }
 
 try {
-    $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret -ResourceHost ([Uri]$siteUrl).Host
+    $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
 } catch {
     Write-Error "Authentication failed: $_"
     throw
 }
 
-# Token for writing to the log list (always on CONFIG_SITE_URL)
-$logToken = if ($logSiteUrl -and ([Uri]$logSiteUrl).Host -ne ([Uri]$siteUrl).Host) {
-    Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret -ResourceHost ([Uri]$logSiteUrl).Host
-} else {
-    $accessToken
-}
-
-$inputBlobName  = "$fileId`_input.pdf"
-$outputBlobName = "$fileId`_output.pdf"
+$inputBlobName  = "$driveItemId`_input.pdf"
+$outputBlobName = "$driveItemId`_output.pdf"
 $tempDir        = [System.IO.Path]::GetTempPath()
 $tempInput      = Join-Path $tempDir $inputBlobName
 $tempOutput     = Join-Path $tempDir $outputBlobName
 
 try {
-    # 1. Download from SharePoint
+    # 1. Download from SharePoint via Graph
     Write-Host "Downloading from SharePoint..."
-    Download-SharePointFile -SiteUrl $siteUrl -ServerRelativeUrl $serverPath `
+    Download-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                             -DestinationPath $tempInput -AccessToken $accessToken
 
     # Stage in blob storage
@@ -85,22 +80,25 @@ try {
         return
     }
 
-    # 3. Replace file in SharePoint
+    # 3. Replace file in SharePoint via Graph
     Write-Host "Replacing file in SharePoint..."
-    Upload-SharePointFile -SiteUrl $siteUrl -ServerRelativeUrl $serverPath `
+    Upload-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                           -FilePath $tempOutput -AccessToken $accessToken
+
+    Remove-OldFileVersions -DriveId $driveId -DriveItemId $driveItemId `
+                           -AccessToken $accessToken -KeepVersions $keepVersions
 
     Write-Host "Done - saved $savedMB MB"
 
     # 4. Write log entry
     if ($logSiteUrl) {
         Write-LogEntry `
-            -SiteUrl        $logSiteUrl `
-            -ListName       $logListName `
-            -AccessToken    $logToken `
-            -FileName       $fileName `
-            -FileSiteUrl    $siteUrl `
-            -LibraryName    $libraryName `
+            -SiteUrl          $logSiteUrl `
+            -ListName         $logListName `
+            -AccessToken      $accessToken `
+            -FileName         $fileName `
+            -FileSiteUrl      $siteUrl `
+            -LibraryName      $libraryName `
             -OriginalSizeMB   $originalSizeMB `
             -CompressedSizeMB $newSizeMB `
             -SavedMB          $savedMB `

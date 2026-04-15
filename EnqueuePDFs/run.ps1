@@ -40,29 +40,21 @@ Write-Host "Global Min:   $globalMinMB MB"
 Write-Host "Run date:     $runDate"
 Write-Host "========================================"
 
-# --- Authenticate to SharePoint ---
+# --- Authenticate ---
 try {
     $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
-    Write-Host "Authenticated to SharePoint"
+    Write-Host "Authenticated to Graph API"
 } catch {
     Write-Error "Authentication failed: $_"
     throw
 }
 
-$headers = @{ Authorization = "Bearer $accessToken"; Accept = "application/json;odata=verbose" }
-
-# --- Read targets from SharePoint list ---
+# --- Read targets from SharePoint list via Graph ---
 Write-Host ""
 Write-Host "Reading targets from '$configListName'..."
 
-$configUri = "$configSiteUrl/_api/web/lists/getbytitle('$configListName')/items?" +
-             "`$select=Id,Title,SiteUrl,LibraryName,Enabled,MinSizeMB&" +
-             "`$filter=Enabled eq 1&" +
-             "`$top=500"
-
 try {
-    $configResponse = Invoke-RestMethod -Uri $configUri -Headers $headers -Method GET
-    $targets = $configResponse.d.results
+    $targets = Read-ConfigList -SiteUrl $configSiteUrl -ListName $configListName -AccessToken $accessToken
 } catch {
     Write-Error "Failed to read config list '$configListName' from $configSiteUrl`: $_"
     throw
@@ -80,55 +72,43 @@ $totalQueued     = 0
 $targetSummaries = @()
 
 foreach ($target in $targets) {
-    $siteUrl      = $target.SiteUrl.Trim()
-    $libraryName  = $target.LibraryName.Trim()
-    $label        = $target.Title
-    $itemId       = $target.Id
-    $minSizeMB    = if ($target.MinSizeMB -and $target.MinSizeMB -gt 0) { $target.MinSizeMB } else { $globalMinMB }
+    $siteUrl      = $target.fields.SiteUrl.Trim()
+    $libraryName  = $target.fields.LibraryName.Trim()
+    $label        = $target.fields.Title
+    $itemId       = $target.id
+    $minSizeMB    = if ($target.fields.MinSizeMB -and $target.fields.MinSizeMB -gt 0) { $target.fields.MinSizeMB } else { $globalMinMB }
     $minSizeBytes = [long]($minSizeMB * 1MB)
 
     Write-Host ""
     Write-Host "--- [$label] $siteUrl / $libraryName (min: $minSizeMB MB) ---"
 
-    $siteToken = $accessToken
-    if ($siteUrl.TrimEnd('/') -ne $configSiteUrl.TrimEnd('/')) {
-        try {
-            $siteToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret -ResourceHost ([Uri]$siteUrl).Host
-        } catch {
-            Write-Warning "  Could not get token for $siteUrl - trying with config site token"
-            $siteToken = $accessToken
-        }
-    }
-
-    $siteHeaders = @{ Authorization = "Bearer $siteToken"; Accept = "application/json;odata=verbose" }
-
-    $uri = "$siteUrl/_api/web/lists/getbytitle('$libraryName')/items?" +
-           "`$select=Id,File/Name,File/ServerRelativeUrl,File/Length&" +
-           "`$expand=File&" +
-           "`$filter=File/Name ne null&" +
-           "`$top=500"
-
-    $pageCount   = 0
     $targetCount = 0
 
     try {
+        # Get site and drive IDs
+        $siteId  = Get-SiteId -SiteUrl $siteUrl -AccessToken $accessToken
+        $driveId = Get-DriveId -SiteId $siteId -LibraryName $libraryName -AccessToken $accessToken
+
+        # Page through all files in the library
+        $uri     = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size&`$top=500"
+        $headers = @{ Authorization = "Bearer $accessToken" }
+
         do {
-            $response = Invoke-RestMethod -Uri $uri -Headers $siteHeaders -Method GET
-            $items    = $response.d.results
-            $pageCount++
+            $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+            $items    = $response.value
 
             foreach ($item in $items) {
-                $f = $item.File
-                if (-not ($f.Name -like "*.pdf")) { continue }
-                if ([long]$f.Length -le $minSizeBytes) { continue }
+                if (-not ($item.name -like "*.pdf")) { continue }
+                if ([long]$item.size -le $minSizeBytes) { continue }
 
                 $message = @{
-                    Id                = $item.Id
-                    Name              = $f.Name
-                    ServerRelativeUrl = $f.ServerRelativeUrl
-                    SizeMB            = [math]::Round([long]$f.Length / 1MB, 2)
-                    SiteUrl           = $siteUrl
-                    LibraryName       = $libraryName
+                    DriveItemId = $item.id
+                    DriveId     = $driveId
+                    SiteId      = $siteId
+                    Name        = $item.name
+                    SizeMB      = [math]::Round([long]$item.size / 1MB, 2)
+                    SiteUrl     = $siteUrl
+                    LibraryName = $libraryName
                 } | ConvertTo-Json -Compress
 
                 Push-OutputBinding -Name outputQueue -Value $message
@@ -137,18 +117,17 @@ foreach ($target in $targets) {
                 $targetCount++
 
                 if ($testMode -and $targetCount -ge $testLimit) {
-                    Write-Host "  TEST MODE: Reached limit of $testLimit files for this library"
+                    Write-Host "  TEST MODE: Reached limit of $testLimit files"
                     $uri = $null
                     break
                 }
             }
 
-            Write-Host "  Page $pageCount - queued $targetCount so far..."
-            $uri = $response.d.__next
+            $uri = $response.'@odata.nextLink'
 
         } while ($uri)
 
-        Write-Host "  Done - enqueued $targetCount file(s) across $pageCount page(s)"
+        Write-Host "  Done - enqueued $targetCount file(s)"
 
         Update-TargetLastCompressed `
             -SiteUrl     $configSiteUrl `
@@ -164,31 +143,29 @@ foreach ($target in $targets) {
         }
 
     } catch {
-        Write-Warning "  Failed for [$label] $siteUrl / $libraryName`: $_"
+        Write-Warning "  Failed for [$label]: $_"
     }
 }
 
 Write-Host ""
 Write-Host "========================================"
-Write-Host "Total enqueued: $totalQueued files across $($targets.Count) target(s)"
+Write-Host "Total enqueued: $totalQueued files"
 Write-Host "========================================"
 
 # --- Send summary email ---
 try {
-    $graphToken = Get-GraphAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
-    $htmlBody   = Build-SummaryEmailHtml `
+    $htmlBody = Build-SummaryEmailHtml `
                     -TotalTargets    $targets.Count `
                     -TotalQueued     $totalQueued `
                     -TargetSummaries $targetSummaries `
                     -RunDate         $runDate
 
     Send-SummaryEmail `
-        -GraphToken  $graphToken `
+        -GraphToken  $accessToken `
         -FromAddress $summaryFrom `
         -ToAddress   $summaryTo `
         -Subject     "PDF Compressor - Nightly Run $((Get-Date).ToString('yyyy-MM-dd')) - $totalQueued files queued" `
         -HtmlBody    $htmlBody
-
 } catch {
     Write-Warning "Could not send summary email: $_"
 }

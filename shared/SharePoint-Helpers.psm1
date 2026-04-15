@@ -1,20 +1,19 @@
 # SharePoint-Helpers.psm1
-# Handles all SharePoint REST API operations
+# All SharePoint operations via Microsoft Graph API (Sites.ReadWrite.All)
 
 function Get-SharePointAccessToken {
     param(
         [string]$TenantId,
         [string]$ClientId,
         [string]$ClientSecret,
-        [string]$ResourceHost = "streamflogroup.sharepoint.com"
+        [string]$ResourceHost = $null  # Unused - kept for backward compat
     )
 
-    # Use SharePoint-specific scope so the token is accepted by the SharePoint REST API
     $body = @{
         grant_type    = "client_credentials"
         client_id     = $ClientId
         client_secret = $ClientSecret
-        scope         = "https://$ResourceHost/.default"
+        scope         = "https://graph.microsoft.com/.default"
     }
 
     $response = Invoke-RestMethod `
@@ -26,7 +25,79 @@ function Get-SharePointAccessToken {
     return $response.access_token
 }
 
-function Get-LargePDFFiles {
+function Get-GraphHeaders {
+    param([string]$AccessToken)
+    return @{
+        Authorization  = "Bearer $AccessToken"
+        "Content-Type" = "application/json"
+    }
+}
+
+function Get-SiteId {
+    param(
+        [string]$SiteUrl,
+        [string]$AccessToken
+    )
+
+    # Convert https://streamflogroup.sharepoint.com/sites/FileMagicUK
+    # to Graph site lookup: /sites/streamflogroup.sharepoint.com:/sites/FileMagicUK
+    $uri = [Uri]$SiteUrl
+    $host = $uri.Host
+    $path = $uri.AbsolutePath.TrimEnd('/')
+
+    $headers  = Get-GraphHeaders $AccessToken
+    $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/${host}:${path}" -Headers $headers
+    return $response.id
+}
+
+function Get-ListId {
+    param(
+        [string]$SiteId,
+        [string]$ListName,
+        [string]$AccessToken
+    )
+
+    $headers  = Get-GraphHeaders $AccessToken
+    $encoded  = [Uri]::EscapeDataString($ListName)
+    $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$filter=displayName eq '$ListName'" -Headers $headers
+    $list     = $response.value | Where-Object { $_.displayName -eq $ListName } | Select-Object -First 1
+    if (-not $list) { throw "List '$ListName' not found on site $SiteId" }
+    return $list.id
+}
+
+function Get-DriveId {
+    param(
+        [string]$SiteId,
+        [string]$LibraryName,
+        [string]$AccessToken
+    )
+
+    $headers  = Get-GraphHeaders $AccessToken
+    $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers $headers
+    $drive    = $response.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
+    if (-not $drive) { throw "Drive/Library '$LibraryName' not found on site $SiteId" }
+    return $drive.id
+}
+
+function Invoke-GraphPagedRequest {
+    param(
+        [string]$Uri,
+        [hashtable]$Headers
+    )
+
+    $allItems = @()
+    $nextUri  = $Uri
+
+    do {
+        $response  = Invoke-RestMethod -Uri $nextUri -Headers $Headers -Method GET
+        $allItems += $response.value
+        $nextUri   = $response.'@odata.nextLink'
+    } while ($nextUri)
+
+    return $allItems
+}
+
+function Get-LargePDFsFromLibrary {
     param(
         [string]$SiteUrl,
         [string]$LibraryName,
@@ -35,74 +106,106 @@ function Get-LargePDFFiles {
     )
 
     $minSizeBytes = [long]($MinSizeMB * 1MB)
-    $headers = @{ Authorization = "Bearer $AccessToken"; Accept = "application/json;odata=verbose" }
+    $headers      = Get-GraphHeaders $AccessToken
+    $siteId       = Get-SiteId -SiteUrl $SiteUrl -AccessToken $AccessToken
+    $driveId      = Get-DriveId -SiteId $siteId -LibraryName $LibraryName -AccessToken $AccessToken
 
-    $uri = "$SiteUrl/_api/web/lists/getbytitle('$LibraryName')/items?" +
-           "`$select=Id,File/Name,File/ServerRelativeUrl,File/Length,File/UniqueId&" +
-           "`$expand=File&" +
-           "`$filter=File/Name ne null&" +
-           "`$top=500"
+    $uri   = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size,parentReference&`$top=500"
+    $items = Invoke-GraphPagedRequest -Uri $uri -Headers $headers
 
-    $allFiles = @()
-
-    do {
-        $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
-        $items = $response.d.results
-
-        foreach ($item in $items) {
-            $file = $item.File
-            if ($file.Name -like "*.pdf" -and [long]$file.Length -gt $minSizeBytes) {
-                $allFiles += [PSCustomObject]@{
-                    Id                = $item.Id
-                    Name              = $file.Name
-                    ServerRelativeUrl = $file.ServerRelativeUrl
-                    Length            = [long]$file.Length
-                    UniqueId          = $file.UniqueId
-                }
+    $pdfs = @()
+    foreach ($item in $items) {
+        if ($item.name -like "*.pdf" -and [long]$item.size -gt $minSizeBytes) {
+            $pdfs += [PSCustomObject]@{
+                DriveItemId = $item.id
+                DriveId     = $driveId
+                SiteId      = $siteId
+                Name        = $item.name
+                SizeMB      = [math]::Round([long]$item.size / 1MB, 2)
+                SiteUrl     = $SiteUrl
+                LibraryName = $LibraryName
             }
         }
+    }
 
-        $uri = $response.d.__next
-    } while ($uri)
+    return $pdfs
+}
 
-    return $allFiles
+function Read-ConfigList {
+    param(
+        [string]$SiteUrl,
+        [string]$ListName,
+        [string]$AccessToken
+    )
+
+    $headers = Get-GraphHeaders $AccessToken
+    $siteId  = Get-SiteId -SiteUrl $SiteUrl -AccessToken $AccessToken
+    $listId  = Get-ListId -SiteId $siteId -ListName $ListName -AccessToken $AccessToken
+
+    $uri   = "https://graph.microsoft.com/v1.0/sites/$siteId/lists/$listId/items?`$expand=fields&`$top=500"
+    $items = Invoke-GraphPagedRequest -Uri $uri -Headers $headers
+
+    return $items | Where-Object { $_.fields.Enabled -eq $true }
+}
+
+function Update-TargetLastCompressed {
+    param(
+        [string]$SiteUrl,
+        [string]$ListName,
+        [string]$AccessToken,
+        [string]$ItemId
+    )
+
+    $headers = Get-GraphHeaders $AccessToken
+    $siteId  = Get-SiteId -SiteUrl $SiteUrl -AccessToken $AccessToken
+    $listId  = Get-ListId -SiteId $siteId -ListName $ListName -AccessToken $AccessToken
+
+    $body = @{
+        fields = @{
+            LastCompressed = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        }
+    } | ConvertTo-Json -Depth 4
+
+    $uri = "https://graph.microsoft.com/v1.0/sites/$siteId/lists/$listId/items/$ItemId"
+    try {
+        Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null
+        Write-Host "  LastCompressed updated for item $ItemId"
+    } catch {
+        Write-Warning "  Could not update LastCompressed: $_"
+    }
 }
 
 function Get-FileMetadata {
     param(
-        [string]$SiteUrl,
-        [string]$FileId,
-        [string]$LibraryName,
+        [string]$SiteId,
+        [string]$ListId,
+        [string]$ItemId,
         [string]$AccessToken
     )
 
-    $headers  = @{ Authorization = "Bearer $AccessToken"; Accept = "application/json;odata=verbose" }
-    $uri      = "$SiteUrl/_api/web/lists/getbytitle('$LibraryName')/items($FileId)"
-    $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+    $headers  = Get-GraphHeaders $AccessToken
+    $uri      = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId?`$expand=fields"
+    $response = Invoke-RestMethod -Uri $uri -Headers $headers
 
     $skipFields = @(
-        "ID", "Id", "GUID", "Created", "Modified", "Author", "Editor",
-        "FileRef", "FileDirRef", "FileLeafRef", "FSObjType", "ContentTypeId",
-        "UniqueId", "ProgId", "ScopeId", "File_x0020_Type", "HTML_x0020_File_x0020_Type",
-        "_Level", "_IsCurrentVersion", "owshiddenversion", "CheckedOutUserId",
-        "IsCheckedoutToLocal", "CheckoutUser", "EncodedAbsUrl", "BaseName",
-        "MetaInfo", "Last_x0020_Modified", "Created_x0020_Date",
-        "_EditMenuTableStart", "_EditMenuTableStart2", "_EditMenuTableEnd",
-        "LinkFilenameNoMenu", "LinkFilename", "LinkFilename2",
-        "DocIcon", "ServerUrl", "EncodedAbsUrl", "Title"
+        "id", "createdDateTime", "lastModifiedDateTime", "eTag", "cTag",
+        "createdBy", "lastModifiedBy", "parentReference", "fileSystemInfo",
+        "ContentType", "Modified", "Created", "Author", "Editor",
+        "_UIVersionString", "Attachments", "Edit", "LinkTitleNoMenu",
+        "LinkTitle", "DocIcon", "FileLeafRef", "FileRef", "FileDirRef",
+        "FSObjType", "SortBehavior", "ProgId", "ScopeId", "UniqueId",
+        "HTML_x0020_File_x0020_Type", "File_x0020_Type", "MetaInfo",
+        "owshiddenversion", "_Level", "_IsCurrentVersion", "ItemChildCount",
+        "FolderChildCount", "SMTotalSize", "SMLastModifiedDate"
     )
 
     $metadata = @{}
-    $item     = $response.d
-
-    foreach ($prop in $item.PSObject.Properties) {
-        $name = $prop.Name
-        if ($name -notin $skipFields -and
-            $name -notlike "__*" -and
-            $name -notlike "odata*" -and
-            $prop.Value -ne $null -and
-            $prop.Value -isnot [System.Management.Automation.PSCustomObject]) {
-            $metadata[$name] = $prop.Value
+    foreach ($prop in $response.fields.PSObject.Properties) {
+        if ($prop.Name -notin $skipFields -and
+            $prop.Name -notlike "@*" -and
+            $prop.Name -notlike "odata*" -and
+            $null -ne $prop.Value) {
+            $metadata[$prop.Name] = $prop.Value
         }
     }
 
@@ -111,9 +214,9 @@ function Get-FileMetadata {
 
 function Set-FileMetadata {
     param(
-        [string]$SiteUrl,
-        [string]$FileId,
-        [string]$LibraryName,
+        [string]$SiteId,
+        [string]$ListId,
+        [string]$ItemId,
         [hashtable]$Metadata,
         [string]$AccessToken
     )
@@ -123,98 +226,81 @@ function Set-FileMetadata {
         return
     }
 
-    $listItemType = "SP.Data." + ($LibraryName -replace " ", "_x0020_") + "Item"
+    $headers = Get-GraphHeaders $AccessToken
+    $body    = @{ fields = $Metadata } | ConvertTo-Json -Depth 5
+    $uri     = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId"
 
-    $headers = @{
-        Authorization   = "Bearer $AccessToken"
-        Accept          = "application/json;odata=verbose"
-        "Content-Type"  = "application/json;odata=verbose"
-        "X-HTTP-Method" = "MERGE"
-        "IF-MATCH"      = "*"
+    try {
+        Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null
+        Write-Host "  Metadata restored"
+    } catch {
+        Write-Warning "  Could not restore metadata: $_"
     }
-
-    $body = @{ "__metadata" = @{ "type" = $listItemType } }
-    $body += $Metadata
-
-    $uri = "$SiteUrl/_api/web/lists/getbytitle('$LibraryName')/items($FileId)"
-    Invoke-RestMethod -Uri $uri -Headers $headers -Method POST -Body ($body | ConvertTo-Json -Depth 5) | Out-Null
 }
 
 function Download-SharePointFile {
     param(
-        [string]$SiteUrl,
-        [string]$ServerRelativeUrl,
+        [string]$DriveId,
+        [string]$DriveItemId,
         [string]$DestinationPath,
         [string]$AccessToken
     )
 
     $headers = @{ Authorization = "Bearer $AccessToken" }
-    $uri     = "$SiteUrl/_api/web/getfilebyserverrelativeurl('$([Uri]::EscapeDataString($ServerRelativeUrl))')/`$value"
+    $uri     = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/content"
     Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $DestinationPath -Method GET
 }
 
 function Upload-SharePointFile {
     param(
-        [string]$SiteUrl,
-        [string]$ServerRelativeUrl,
+        [string]$DriveId,
+        [string]$DriveItemId,
         [string]$FilePath,
         [string]$AccessToken
     )
 
-    $headers   = @{ Authorization = "Bearer $AccessToken"; Accept = "application/json;odata=verbose" }
-    $fileName  = [System.IO.Path]::GetFileName($ServerRelativeUrl)
-    $folderUrl = [System.IO.Path]::GetDirectoryName($ServerRelativeUrl).Replace("\", "/")
-
-    $uri = "$SiteUrl/_api/web/getfolderbyserverrelativeurl('$([Uri]::EscapeDataString($folderUrl))')" +
-           "/files/add(overwrite=true,url='$([Uri]::EscapeDataString($fileName))')"
-
+    $headers   = @{ Authorization = "Bearer $AccessToken"; "Content-Type" = "application/octet-stream" }
+    $uri       = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/content"
     $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
-    Invoke-RestMethod -Uri $uri -Headers $headers -Method POST -Body $fileBytes | Out-Null
+    Invoke-RestMethod -Uri $uri -Method PUT -Headers $headers -Body $fileBytes | Out-Null
 }
 
 function Remove-OldFileVersions {
     param(
-        [string]$SiteUrl,
-        [string]$ServerRelativeUrl,
+        [string]$DriveId,
+        [string]$DriveItemId,
         [string]$AccessToken,
         [int]$KeepVersions = 1
     )
 
-    $headers  = @{ Authorization = "Bearer $AccessToken"; Accept = "application/json;odata=verbose" }
-    $uri      = "$SiteUrl/_api/web/getfilebyserverrelativeurl('$([Uri]::EscapeDataString($ServerRelativeUrl))')/versions"
+    $headers  = Get-GraphHeaders $AccessToken
+    $uri      = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions"
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
-    $versions = $response.d.results
+    $versions = $response.value
 
     if ($versions.Count -le $KeepVersions) {
         Write-Host "  Only $($versions.Count) version(s) - nothing to clean up"
         return
     }
 
-    $toDelete = $versions | Sort-Object { [double]$_.VersionLabel } -Descending | Select-Object -Skip $KeepVersions
+    $toDelete = $versions | Sort-Object lastModifiedDateTime -Descending | Select-Object -Skip $KeepVersions
 
     foreach ($version in $toDelete) {
-        $versionId  = $version.ID
-        $deleteUri  = "$SiteUrl/_api/web/getfilebyserverrelativeurl('$([Uri]::EscapeDataString($ServerRelativeUrl))')/versions/deletebyid(vid=$versionId)"
-        $delHeaders = @{
-            Authorization   = "Bearer $AccessToken"
-            Accept          = "application/json;odata=verbose"
-            "X-HTTP-Method" = "DELETE"
-            "IF-MATCH"      = "*"
-        }
+        $versionId = $version.id
         try {
-            Invoke-RestMethod -Uri $deleteUri -Headers $delHeaders -Method POST | Out-Null
+            Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions/$versionId/restoreVersion" -Method POST -Headers $headers | Out-Null
         } catch {
             Write-Warning "  Could not delete version $versionId`: $_"
         }
     }
 
-    Write-Host "  Deleted $($toDelete.Count) old version(s), kept $KeepVersions"
+    Write-Host "  Cleaned up $($toDelete.Count) old version(s)"
 }
 
 function Write-LogEntry {
     param(
         [string]$SiteUrl,
-        [string]$ListName = "SFGCFMCompressorLog",
+        [string]$ListName,
         [string]$AccessToken,
         [string]$FileName,
         [string]$FileSiteUrl,
@@ -225,64 +311,29 @@ function Write-LogEntry {
         [int]$SavingsPct
     )
 
-    $listItemType = "SP.Data." + ($ListName -replace " ", "_x0020_") + "Item"
-
-    $headers = @{
-        Authorization  = "Bearer $AccessToken"
-        Accept         = "application/json;odata=verbose"
-        "Content-Type" = "application/json;odata=verbose"
-    }
+    $headers = Get-GraphHeaders $AccessToken
+    $siteId  = Get-SiteId -SiteUrl $SiteUrl -AccessToken $AccessToken
+    $listId  = Get-ListId -SiteId $siteId -ListName $ListName -AccessToken $AccessToken
 
     $body = @{
-        "__metadata"       = @{ "type" = $listItemType }
-        "Title"            = $FileName
-        "SiteUrl"          = $FileSiteUrl
-        "LibraryName"      = $LibraryName
-        "OriginalSizeMB"   = $OriginalSizeMB
-        "CompressedSizeMB" = $CompressedSizeMB
-        "SavedMB"          = $SavedMB
-        "SavingsPct"       = $SavingsPct
-        "ProcessedDate"    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        fields = @{
+            Title             = $FileName
+            SiteUrl           = $FileSiteUrl
+            LibraryName       = $LibraryName
+            OriginalSizeMB    = $OriginalSizeMB
+            CompressedSizeMB  = $CompressedSizeMB
+            SavedMB           = $SavedMB
+            SavingsPct        = $SavingsPct
+            ProcessedDate     = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        }
     } | ConvertTo-Json -Depth 4
 
-    $uri = "$SiteUrl/_api/web/lists/getbytitle('$ListName')/items"
+    $uri = "https://graph.microsoft.com/v1.0/sites/$siteId/lists/$listId/items"
     try {
-        Invoke-RestMethod -Uri $uri -Headers $headers -Method POST -Body $body | Out-Null
+        Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $body | Out-Null
         Write-Host "  Log entry written for $FileName"
     } catch {
         Write-Warning "  Could not write log entry for $FileName`: $_"
-    }
-}
-
-function Update-TargetLastCompressed {
-    param(
-        [string]$SiteUrl,
-        [string]$ListName = "SFGCFMCompressor",
-        [string]$AccessToken,
-        [int]$ItemId
-    )
-
-    $listItemType = "SP.Data." + ($ListName -replace " ", "_x0020_") + "Item"
-
-    $headers = @{
-        Authorization   = "Bearer $AccessToken"
-        Accept          = "application/json;odata=verbose"
-        "Content-Type"  = "application/json;odata=verbose"
-        "X-HTTP-Method" = "MERGE"
-        "IF-MATCH"      = "*"
-    }
-
-    $body = @{
-        "__metadata"     = @{ "type" = $listItemType }
-        "LastCompressed" = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    } | ConvertTo-Json -Depth 3
-
-    $uri = "$SiteUrl/_api/web/lists/getbytitle('$ListName')/items($ItemId)"
-    try {
-        Invoke-RestMethod -Uri $uri -Headers $headers -Method POST -Body $body | Out-Null
-        Write-Host "  LastCompressed updated for item $ItemId"
-    } catch {
-        Write-Warning "  Could not update LastCompressed for item $ItemId`: $_"
     }
 }
 
