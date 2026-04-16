@@ -1,5 +1,5 @@
 # Compress-PDF.psm1
-# Handles PDF compression using Ghostscript (Windows)
+# Handles PDF compression using Ghostscript (Linux)
 
 function Compress-PDFFile {
     param(
@@ -8,9 +8,10 @@ function Compress-PDFFile {
         [string]$Quality = "ebook"   # screen=72dpi, ebook=150dpi, printer=300dpi
     )
 
-    $gsPath = Find-Ghostscript
+    # On Linux, gs is installed via apt-get in profile.ps1
+    $gsPath = (Get-Command "gs" -ErrorAction SilentlyContinue)?.Source
     if (-not $gsPath) {
-        throw "Ghostscript not found. Ensure profile.ps1 ran successfully."
+        throw "Ghostscript (gs) not found. Ensure profile.ps1 ran successfully."
     }
 
     Write-Host "  Using Ghostscript: $gsPath"
@@ -29,10 +30,10 @@ function Compress-PDFFile {
         $InputPath
     )
 
-    $proc = Start-Process -FilePath $gsPath -ArgumentList $args -Wait -PassThru -NoNewWindow -RedirectStandardError "$env:TEMP\gs_error.txt"
+    $proc = Start-Process -FilePath $gsPath -ArgumentList $args -Wait -PassThru -NoNewWindow -RedirectStandardError "/tmp/gs_error.txt"
 
     if ($proc.ExitCode -ne 0) {
-        $errText = Get-Content "$env:TEMP\gs_error.txt" -ErrorAction SilentlyContinue
+        $errText = Get-Content "/tmp/gs_error.txt" -ErrorAction SilentlyContinue
         throw "Ghostscript failed (exit $($proc.ExitCode)): $errText"
     }
 
@@ -41,28 +42,6 @@ function Compress-PDFFile {
     }
 
     return $true
-}
-
-function Find-Ghostscript {
-    # Check C:\home\gs first (our install location)
-    $homeGs = Get-ChildItem -Path "C:\home\gs" -Recurse -Filter "gswin64c.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($homeGs) { return $homeGs.FullName }
-
-    # Check PATH
-    foreach ($name in @("gswin64c.exe", "gswin32c.exe", "gs")) {
-        $found = Get-Command $name -ErrorAction SilentlyContinue
-        if ($found) { return $found.Source }
-    }
-
-    # Check common install directories
-    foreach ($dir in @("C:\Program Files\gs", "C:\Program Files (x86)\gs")) {
-        if (Test-Path $dir) {
-            $exe = Get-ChildItem -Path $dir -Recurse -Filter "gswin64c.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($exe) { return $exe.FullName }
-        }
-    }
-
-    return $null
 }
 
 Export-ModuleMember -Function *

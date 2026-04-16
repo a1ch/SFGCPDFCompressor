@@ -1,23 +1,28 @@
-# DISABLED - sfgcpdfcompressor2 (Windows) replaced by sfgcpdfcompressor3 (Linux)
-name: Build and deploy PowerShell project to Azure Function App - sfgcpdfcompressor2 (DISABLED)
+# Deploy to sfgcpdfcompressor3 (Functions Premium - Linux)
+name: Build and deploy PowerShell project to Azure Function App - sfgcpdfcompressor3
 
 on:
-  workflow_dispatch: # Manual only
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
-  AZURE_FUNCTIONAPP_NAME: 'sfgcpdfcompressor2'
+  AZURE_FUNCTIONAPP_NAME: 'sfgcpdfcompressor3'
 
 jobs:
   deploy:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+
     steps:
       - name: 'Checkout GitHub Action'
         uses: actions/checkout@v4
+
       - name: 'Run Azure Functions Action'
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_3 }}
