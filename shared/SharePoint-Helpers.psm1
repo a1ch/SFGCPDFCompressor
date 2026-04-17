@@ -39,9 +39,7 @@ function Get-SiteId {
         [string]$AccessToken
     )
 
-    # Convert https://streamflogroup.sharepoint.com/sites/FileMagicUK
-    # to Graph site lookup: /sites/streamflogroup.sharepoint.com:/sites/FileMagicUK
-    $uri = [Uri]$SiteUrl
+    $uri  = [Uri]$SiteUrl
     $host = $uri.Host
     $path = $uri.AbsolutePath.TrimEnd('/')
 
@@ -96,40 +94,6 @@ function Invoke-GraphPagedRequest {
     return $allItems
 }
 
-function Get-LargePDFsFromLibrary {
-    param(
-        [string]$SiteUrl,
-        [string]$LibraryName,
-        [string]$AccessToken,
-        [double]$MinSizeMB = 5
-    )
-
-    $minSizeBytes = [long]($MinSizeMB * 1MB)
-    $headers      = Get-GraphHeaders $AccessToken
-    $siteId       = Get-SiteId -SiteUrl $SiteUrl -AccessToken $AccessToken
-    $driveId      = Get-DriveId -SiteId $siteId -LibraryName $LibraryName -AccessToken $AccessToken
-
-    $uri   = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size,parentReference&`$top=500"
-    $items = Invoke-GraphPagedRequest -Uri $uri -Headers $headers
-
-    $pdfs = @()
-    foreach ($item in $items) {
-        if ($item.name -like "*.pdf" -and [long]$item.size -gt $minSizeBytes) {
-            $pdfs += [PSCustomObject]@{
-                DriveItemId = $item.id
-                DriveId     = $driveId
-                SiteId      = $siteId
-                Name        = $item.name
-                SizeMB      = [math]::Round([long]$item.size / 1MB, 2)
-                SiteUrl     = $SiteUrl
-                LibraryName = $LibraryName
-            }
-        }
-    }
-
-    return $pdfs
-}
-
 function Read-ConfigList {
     param(
         [string]$SiteUrl,
@@ -174,69 +138,6 @@ function Update-TargetLastCompressed {
     }
 }
 
-function Get-FileMetadata {
-    param(
-        [string]$SiteId,
-        [string]$ListId,
-        [string]$ItemId,
-        [string]$AccessToken
-    )
-
-    $headers  = Get-GraphHeaders $AccessToken
-    $uri      = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId?`$expand=fields"
-    $response = Invoke-RestMethod -Uri $uri -Headers $headers
-
-    $skipFields = @(
-        "id", "createdDateTime", "lastModifiedDateTime", "eTag", "cTag",
-        "createdBy", "lastModifiedBy", "parentReference", "fileSystemInfo",
-        "ContentType", "Modified", "Created", "Author", "Editor",
-        "_UIVersionString", "Attachments", "Edit", "LinkTitleNoMenu",
-        "LinkTitle", "DocIcon", "FileLeafRef", "FileRef", "FileDirRef",
-        "FSObjType", "SortBehavior", "ProgId", "ScopeId", "UniqueId",
-        "HTML_x0020_File_x0020_Type", "File_x0020_Type", "MetaInfo",
-        "owshiddenversion", "_Level", "_IsCurrentVersion", "ItemChildCount",
-        "FolderChildCount", "SMTotalSize", "SMLastModifiedDate"
-    )
-
-    $metadata = @{}
-    foreach ($prop in $response.fields.PSObject.Properties) {
-        if ($prop.Name -notin $skipFields -and
-            $prop.Name -notlike "@*" -and
-            $prop.Name -notlike "odata*" -and
-            $null -ne $prop.Value) {
-            $metadata[$prop.Name] = $prop.Value
-        }
-    }
-
-    return $metadata
-}
-
-function Set-FileMetadata {
-    param(
-        [string]$SiteId,
-        [string]$ListId,
-        [string]$ItemId,
-        [hashtable]$Metadata,
-        [string]$AccessToken
-    )
-
-    if ($Metadata.Count -eq 0) {
-        Write-Host "  No metadata to restore"
-        return
-    }
-
-    $headers = Get-GraphHeaders $AccessToken
-    $body    = @{ fields = $Metadata } | ConvertTo-Json -Depth 5
-    $uri     = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId"
-
-    try {
-        Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null
-        Write-Host "  Metadata restored"
-    } catch {
-        Write-Warning "  Could not restore metadata: $_"
-    }
-}
-
 function Download-SharePointFile {
     param(
         [string]$DriveId,
@@ -258,10 +159,61 @@ function Upload-SharePointFile {
         [string]$AccessToken
     )
 
-    $headers   = @{ Authorization = "Bearer $AccessToken"; "Content-Type" = "application/octet-stream" }
-    $uri       = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/content"
-    $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
-    Invoke-RestMethod -Uri $uri -Method PUT -Headers $headers -Body $fileBytes | Out-Null
+    # Graph API limit: simple PUT only works up to 4MB.
+    # For anything larger we use an upload session (chunked upload).
+    # We always use the upload session path to keep the code consistent.
+
+    $fileSize  = (Get-Item $FilePath).Length
+    $chunkSize = 5 * 1024 * 1024   # 5 MB chunks (must be multiple of 320KB)
+
+    Write-Host "  Uploading $([math]::Round($fileSize / 1MB, 1)) MB via upload session..."
+
+    # 1. Create upload session
+    $sessionUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/createUploadSession"
+    $sessionBody = @{ item = @{ "@microsoft.graph.conflictBehavior" = "replace" } } | ConvertTo-Json
+    $headers     = Get-GraphHeaders $AccessToken
+
+    $session     = Invoke-RestMethod -Uri $sessionUri -Method POST -Headers $headers -Body $sessionBody
+    $uploadUrl   = $session.uploadUrl
+
+    if (-not $uploadUrl) {
+        throw "Failed to create upload session - no uploadUrl returned"
+    }
+
+    # 2. Upload in chunks
+    $stream = [System.IO.File]::OpenRead($FilePath)
+    try {
+        $offset = 0
+        $buffer = New-Object byte[] $chunkSize
+
+        while ($offset -lt $fileSize) {
+            $bytesRead = $stream.Read($buffer, 0, $chunkSize)
+            $chunk     = $buffer[0..($bytesRead - 1)]
+            $end       = $offset + $bytesRead - 1
+
+            $chunkHeaders = @{
+                "Content-Range" = "bytes $offset-$end/$fileSize"
+                "Content-Type"  = "application/octet-stream"
+            }
+
+            try {
+                Invoke-RestMethod -Uri $uploadUrl -Method PUT -Headers $chunkHeaders -Body $chunk | Out-Null
+            } catch {
+                # 202 Accepted is a success for intermediate chunks — swallow it
+                if ($_.Exception.Response.StatusCode.value__ -notin @(202, 200, 201)) {
+                    throw
+                }
+            }
+
+            $offset += $bytesRead
+            $pct = [math]::Round($offset * 100 / $fileSize, 0)
+            Write-Host "  Upload progress: $pct% ($([math]::Round($offset/1MB,1)) / $([math]::Round($fileSize/1MB,1)) MB)"
+        }
+    } finally {
+        $stream.Close()
+    }
+
+    Write-Host "  Upload complete"
 }
 
 function Remove-OldFileVersions {
@@ -277,12 +229,8 @@ function Remove-OldFileVersions {
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
     $versions = $response.value
 
-    # The current version is always the first in the list (highest version number).
-    # We never delete it - only old versions behind it.
-    # KeepVersions=0 means delete all old versions (keep current only).
-    # KeepVersions=1 means keep 1 old version behind current, etc.
-
-    # Skip the current version (index 0), then skip KeepVersions more
+    # Current version is always first. Never delete it.
+    # KeepVersions=0 = current only, KeepVersions=1 = current + 1 previous, etc.
     $toDelete = $versions | Select-Object -Skip 1 | Select-Object -Skip $KeepVersions
 
     if ($toDelete.Count -eq 0) {
