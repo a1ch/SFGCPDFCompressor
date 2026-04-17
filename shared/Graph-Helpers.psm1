@@ -30,7 +30,9 @@ function Send-SummaryEmail {
         [string]$FromAddress,
         [string]$ToAddress,
         [string]$Subject,
-        [string]$HtmlBody
+        [string]$HtmlBody,
+        [string]$AttachmentName = $null,   # e.g. "queued-files.txt"
+        [string]$AttachmentContent = $null  # plain text content to attach
     )
 
     $headers = @{
@@ -38,19 +40,34 @@ function Send-SummaryEmail {
         "Content-Type" = "application/json"
     }
 
-    $payload = @{
-        message = @{
-            subject = $Subject
-            body    = @{
-                contentType = "HTML"
-                content     = $HtmlBody
-            }
-            toRecipients = @(
-                @{ emailAddress = @{ address = $ToAddress } }
-            )
+    $message = @{
+        subject = $Subject
+        body    = @{
+            contentType = "HTML"
+            content     = $HtmlBody
         }
+        toRecipients = @(
+            @{ emailAddress = @{ address = $ToAddress } }
+        )
+    }
+
+    # Add attachment if provided
+    if ($AttachmentName -and $AttachmentContent) {
+        $encodedContent = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($AttachmentContent))
+        $message.attachments = @(
+            @{
+                "@odata.type"  = "#microsoft.graph.fileAttachment"
+                name           = $AttachmentName
+                contentType    = "text/plain"
+                contentBytes   = $encodedContent
+            }
+        )
+    }
+
+    $payload = @{
+        message         = $message
         saveToSentItems = $false
-    } | ConvertTo-Json -Depth 6
+    } | ConvertTo-Json -Depth 8
 
     $uri = "https://graph.microsoft.com/v1.0/users/$FromAddress/sendMail"
     Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $payload | Out-Null
@@ -61,7 +78,7 @@ function Build-SummaryEmailHtml {
     param(
         [int]$TotalTargets,
         [int]$TotalQueued,
-        [array]$TargetSummaries,   # array of @{ Label, SiteUrl, LibraryName, Count, MinSizeMB }
+        [array]$TargetSummaries,
         [string]$RunDate
     )
 
@@ -102,7 +119,7 @@ function Build-SummaryEmailHtml {
     </table>
   </div>
   <div style='padding:12px 24px;background:#f0f0f0;font-size:11px;color:#999;'>
-    This is an automated message from SFGCPDFCompressor. Files are compressed nightly at 2:00 AM.
+    See attached queued-files.txt for the full file manifest. Compression results will appear in the SFGCFMCompressorLog SharePoint list.
   </div>
 </body></html>
 "@
