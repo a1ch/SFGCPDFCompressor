@@ -1,28 +1,23 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-
+# DISABLED - superseded by main_sfgcpdfcompressor3.yml
 name: Build and deploy Powershell project to Azure Function App - sfgccompressor3
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+      id-token: write
+      contents: read
 
     steps:
       - name: 'Checkout GitHub Action'
         uses: actions/checkout@v4
-      
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -37,4 +32,3 @@ jobs:
           app-name: 'sfgccompressor3'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          
