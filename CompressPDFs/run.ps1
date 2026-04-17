@@ -4,6 +4,8 @@ param($QueueItem)
 # CompressPDFs - Queue Trigger
 # Processes ONE PDF per execution.
 # Downloads the file, compresses it, replaces it in place.
+# Reads SharePoint column metadata before upload and restores
+# it after so custom columns are never lost.
 # Writes a log entry to SFGCFMCompressorLog after each file.
 # ============================================================
 
@@ -22,7 +24,6 @@ $rawMessage = $QueueItem
 try {
     $file = $rawMessage | ConvertFrom-Json
 } catch {
-    # Try base64 decode
     try {
         $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($rawMessage))
         $file = $decoded | ConvertFrom-Json
@@ -36,6 +37,8 @@ $fileName       = $file.Name
 $driveItemId    = $file.DriveItemId
 $driveId        = $file.DriveId
 $siteId         = $file.SiteId
+$listId         = $file.ListId
+$listItemId     = $file.ListItemId
 $originalSizeMB = $file.SizeMB
 $siteUrl        = $file.SiteUrl
 $libraryName    = $file.LibraryName
@@ -58,7 +61,21 @@ $tempInput  = Join-Path $tempDir "$driveItemId`_input.pdf"
 $tempOutput = Join-Path $tempDir "$driveItemId`_output.pdf"
 
 try {
-    # 1. Download from SharePoint via Graph
+    # 1. Snapshot column metadata BEFORE touching the file
+    $metadata = @{}
+    if ($listId -and $listItemId) {
+        Write-Host "Reading column metadata..."
+        try {
+            $metadata = Get-FileMetadata -SiteId $siteId -ListId $listId -ItemId $listItemId -AccessToken $accessToken
+            Write-Host "  Captured $($metadata.Count) column value(s)"
+        } catch {
+            Write-Warning "  Could not read metadata - will proceed but columns may not be preserved: $_"
+        }
+    } else {
+        Write-Warning "  No ListId/ListItemId in queue message - column metadata will not be preserved"
+    }
+
+    # 2. Download from SharePoint via Graph
     Write-Host "Downloading from SharePoint..."
     Download-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                             -DestinationPath $tempInput -AccessToken $accessToken
@@ -66,7 +83,7 @@ try {
     $downloadedSize = (Get-Item $tempInput).Length
     Write-Host "Downloaded: $([math]::Round($downloadedSize / 1MB, 2)) MB"
 
-    # 2. Compress
+    # 3. Compress
     Write-Host "Compressing..."
     Compress-PDFFile -InputPath $tempInput -OutputPath $tempOutput | Out-Null
 
@@ -80,17 +97,28 @@ try {
         return
     }
 
-    # 3. Replace file in SharePoint via Graph
+    # 4. Upload compressed file back to SharePoint
     Write-Host "Replacing file in SharePoint..."
     Upload-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                           -FilePath $tempOutput -AccessToken $accessToken
+
+    # 5. Restore column metadata immediately after upload
+    if ($listId -and $listItemId -and $metadata.Count -gt 0) {
+        Write-Host "Restoring column metadata..."
+        try {
+            Set-FileMetadata -SiteId $siteId -ListId $listId -ItemId $listItemId `
+                             -Metadata $metadata -AccessToken $accessToken
+        } catch {
+            Write-Warning "  Could not restore metadata: $_"
+        }
+    }
 
     Remove-OldFileVersions -DriveId $driveId -DriveItemId $driveItemId `
                            -AccessToken $accessToken -KeepVersions $keepVersions
 
     Write-Host "Done - saved $savedMB MB"
 
-    # 4. Write log entry
+    # 6. Write log entry
     if ($logSiteUrl) {
         Write-LogEntry `
             -SiteUrl          $logSiteUrl `
