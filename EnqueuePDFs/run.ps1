@@ -4,6 +4,7 @@ param($Timer)
 # EnqueuePDFs - Timer Trigger
 # Reads a SharePoint list ("SFGCFMCompressor") to find which
 # sites/libraries to process tonight.
+# Skips any row where LastCompressed is already set.
 # After scanning each library, writes LastCompressed back to
 # the control list row.
 # Sends a summary email via Graph API when done.
@@ -70,17 +71,26 @@ if ($targets.Count -eq 0) {
 # --- Process each target ---
 $totalQueued     = 0
 $targetSummaries = @()
+$skippedCount    = 0
 
 foreach ($target in $targets) {
     $siteUrl      = $target.fields.SiteUrl.Trim()
     $libraryName  = $target.fields.LibraryName.Trim()
     $label        = $target.fields.Title
     $itemId       = $target.id
+    $lastCompressed = $target.fields.LastCompressed
     $minSizeMB    = if ($target.fields.MinSizeMB -and $target.fields.MinSizeMB -gt 0) { $target.fields.MinSizeMB } else { $globalMinMB }
     $minSizeBytes = [long]($minSizeMB * 1MB)
 
     Write-Host ""
-    Write-Host "--- [$label] $siteUrl / $libraryName (min: $minSizeMB MB) ---"
+    Write-Host "--- [$label] $siteUrl / $libraryName ---"
+
+    # Skip if LastCompressed is already set
+    if ($lastCompressed) {
+        Write-Host "  SKIPPED - already compressed on $lastCompressed"
+        $skippedCount++
+        continue
+    }
 
     $targetCount = 0
 
@@ -150,6 +160,7 @@ foreach ($target in $targets) {
 Write-Host ""
 Write-Host "========================================"
 Write-Host "Total enqueued: $totalQueued files"
+Write-Host "Skipped (already compressed): $skippedCount"
 Write-Host "========================================"
 
 # --- Send summary email ---
