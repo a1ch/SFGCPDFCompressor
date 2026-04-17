@@ -1,23 +1,27 @@
 # profile.ps1 - runs on Function App startup (Linux)
-# Installs Ghostscript for PDF compression
+# Installs Ghostscript for PDF compression if not already present.
+# Throws on failure so the host knows compression won't work.
 
 Write-Host "Checking Ghostscript..."
 $gs = Get-Command "gs" -ErrorAction SilentlyContinue
+
 if ($gs) {
     Write-Host "Ghostscript ready at $($gs.Source)"
 } else {
-    Write-Host "Installing Ghostscript..."
+    Write-Host "Ghostscript not found - attempting install..."
+
     $aptCheck = Get-Command "apt-get" -ErrorAction SilentlyContinue
     if (-not $aptCheck) {
-        Write-Warning "apt-get not found - cannot install Ghostscript"
+        throw "apt-get not available - cannot install Ghostscript. Use a custom Docker image with ghostscript pre-installed."
+    }
+
+    $result = bash -c "sudo apt-get install -y ghostscript 2>&1"
+    Write-Host $result
+
+    $gs = Get-Command "gs" -ErrorAction SilentlyContinue
+    if ($gs) {
+        Write-Host "Ghostscript installed successfully at $($gs.Source)"
     } else {
-        $result = bash -c "sudo apt-get install -y ghostscript 2>&1"
-        Write-Host $result
-        $gs = Get-Command "gs" -ErrorAction SilentlyContinue
-        if ($gs) {
-            Write-Host "Ghostscript installed at $($gs.Source)"
-        } else {
-            Write-Warning "Ghostscript installation failed - compression will not work"
-        }
+        throw "Ghostscript installation failed. CompressPDFs will not work. Check that the Function App has apt-get write access, or use a custom Docker image with ghostscript pre-installed."
     }
 }
