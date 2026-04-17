@@ -6,6 +6,8 @@ param($Timer)
 # sites/libraries to process tonight.
 # Skips any row where LastCompressed is already set.
 # Recursively scans ALL subfolders in each library.
+# Includes ListId and ListItemId in queue messages so
+# CompressPDFs can preserve column metadata.
 # After scanning each library, writes LastCompressed back to
 # the control list row.
 # Sends a summary email via Graph API when done.
@@ -57,6 +59,7 @@ function Scan-Folder {
         [string]$FolderUri,
         [string]$DriveId,
         [string]$SiteId,
+        [string]$ListId,
         [string]$SiteUrl,
         [string]$LibraryName,
         [long]$MinSizeBytes,
@@ -64,6 +67,7 @@ function Scan-Folder {
         [ref]$Done
     )
 
+    # Include listItem in $expand so we get the list item ID for metadata preservation
     $headers = @{ Authorization = "Bearer $accessToken" }
     $uri = $FolderUri
 
@@ -74,9 +78,8 @@ function Scan-Folder {
             if ($Done.Value) { return }
 
             if ($item.folder) {
-                # Recurse into subfolder
-                $subUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$($item.id)/children?`$select=id,name,size,folder&`$top=500"
-                Scan-Folder -FolderUri $subUri -DriveId $DriveId -SiteId $SiteId `
+                $subUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$($item.id)/children?`$select=id,name,size,folder,listItem&`$expand=listItem(`$select=id)&`$top=500"
+                Scan-Folder -FolderUri $subUri -DriveId $DriveId -SiteId $SiteId -ListId $ListId `
                             -SiteUrl $SiteUrl -LibraryName $LibraryName `
                             -MinSizeBytes $MinSizeBytes -Count $Count -Done $Done
                 if ($Done.Value) { return }
@@ -90,6 +93,8 @@ function Scan-Folder {
                 DriveItemId = $item.id
                 DriveId     = $DriveId
                 SiteId      = $SiteId
+                ListId      = $ListId
+                ListItemId  = $item.listItem.id
                 Name        = $item.name
                 SizeMB      = [math]::Round([long]$item.size / 1MB, 2)
                 SiteUrl     = $SiteUrl
@@ -157,10 +162,12 @@ foreach ($target in $targets) {
     try {
         $siteId  = Get-SiteId -SiteUrl $siteUrl -AccessToken $accessToken
         $driveId = Get-DriveId -SiteId $siteId -LibraryName $libraryName -AccessToken $accessToken
+        $listId  = Get-ListId -SiteId $siteId -ListName $libraryName -AccessToken $accessToken
 
-        $rootUri = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size,folder&`$top=500"
+        # Include listItem expand from root scan so we get list item IDs
+        $rootUri = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size,folder,listItem&`$expand=listItem(`$select=id)&`$top=500"
 
-        Scan-Folder -FolderUri $rootUri -DriveId $driveId -SiteId $siteId `
+        Scan-Folder -FolderUri $rootUri -DriveId $driveId -SiteId $siteId -ListId $listId `
                     -SiteUrl $siteUrl -LibraryName $libraryName `
                     -MinSizeBytes $minSizeBytes -Count ([ref]$targetCount) -Done ([ref]$done)
 
