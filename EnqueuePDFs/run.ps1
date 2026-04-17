@@ -5,6 +5,7 @@ param($Timer)
 # Reads a SharePoint list ("SFGCFMCompressor") to find which
 # sites/libraries to process tonight.
 # Skips any row where LastCompressed is already set.
+# Recursively scans ALL subfolders in each library.
 # After scanning each library, writes LastCompressed back to
 # the control list row.
 # Sends a summary email via Graph API when done.
@@ -50,6 +51,64 @@ try {
     throw
 }
 
+# --- Helper: recursively scan a folder and enqueue matching PDFs ---
+function Scan-Folder {
+    param(
+        [string]$FolderUri,
+        [string]$DriveId,
+        [string]$SiteId,
+        [string]$SiteUrl,
+        [string]$LibraryName,
+        [long]$MinSizeBytes,
+        [ref]$Count,
+        [ref]$Done
+    )
+
+    $headers = @{ Authorization = "Bearer $accessToken" }
+    $uri = $FolderUri
+
+    do {
+        $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+        foreach ($item in $response.value) {
+
+            if ($Done.Value) { return }
+
+            if ($item.folder) {
+                # Recurse into subfolder
+                $subUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$($item.id)/children?`$select=id,name,size,folder&`$top=500"
+                Scan-Folder -FolderUri $subUri -DriveId $DriveId -SiteId $SiteId `
+                            -SiteUrl $SiteUrl -LibraryName $LibraryName `
+                            -MinSizeBytes $MinSizeBytes -Count $Count -Done $Done
+                if ($Done.Value) { return }
+                continue
+            }
+
+            if (-not ($item.name -like "*.pdf")) { continue }
+            if ([long]$item.size -le $MinSizeBytes) { continue }
+
+            $message = @{
+                DriveItemId = $item.id
+                DriveId     = $DriveId
+                SiteId      = $SiteId
+                Name        = $item.name
+                SizeMB      = [math]::Round([long]$item.size / 1MB, 2)
+                SiteUrl     = $SiteUrl
+                LibraryName = $LibraryName
+            } | ConvertTo-Json -Compress
+
+            Push-OutputBinding -Name outputQueue -Value $message
+            $Count.Value++
+
+            if ($testMode -and $Count.Value -ge $testLimit) {
+                Write-Host "  TEST MODE: Reached limit of $testLimit files"
+                $Done.Value = $true
+                return
+            }
+        }
+        $uri = $response.'@odata.nextLink'
+    } while ($uri)
+}
+
 # --- Read targets from SharePoint list via Graph ---
 Write-Host ""
 Write-Host "Reading targets from '$configListName'..."
@@ -74,13 +133,13 @@ $targetSummaries = @()
 $skippedCount    = 0
 
 foreach ($target in $targets) {
-    $siteUrl      = $target.fields.SiteUrl.Trim()
-    $libraryName  = $target.fields.LibraryName.Trim()
-    $label        = $target.fields.Title
-    $itemId       = $target.id
+    $siteUrl        = $target.fields.SiteUrl.Trim()
+    $libraryName    = $target.fields.LibraryName.Trim()
+    $label          = $target.fields.Title
+    $itemId         = $target.id
     $lastCompressed = $target.fields.LastCompressed
-    $minSizeMB    = if ($target.fields.MinSizeMB -and $target.fields.MinSizeMB -gt 0) { $target.fields.MinSizeMB } else { $globalMinMB }
-    $minSizeBytes = [long]($minSizeMB * 1MB)
+    $minSizeMB      = if ($target.fields.MinSizeMB -and $target.fields.MinSizeMB -gt 0) { $target.fields.MinSizeMB } else { $globalMinMB }
+    $minSizeBytes   = [long]($minSizeMB * 1MB)
 
     Write-Host ""
     Write-Host "--- [$label] $siteUrl / $libraryName ---"
@@ -93,51 +152,20 @@ foreach ($target in $targets) {
     }
 
     $targetCount = 0
+    $done        = $false
 
     try {
-        # Get site and drive IDs
         $siteId  = Get-SiteId -SiteUrl $siteUrl -AccessToken $accessToken
         $driveId = Get-DriveId -SiteId $siteId -LibraryName $libraryName -AccessToken $accessToken
 
-        # Page through all files in the library
-        $uri     = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size&`$top=500"
-        $headers = @{ Authorization = "Bearer $accessToken" }
+        $rootUri = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size,folder&`$top=500"
 
-        do {
-            $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
-            $items    = $response.value
-
-            foreach ($item in $items) {
-                if (-not ($item.name -like "*.pdf")) { continue }
-                if ([long]$item.size -le $minSizeBytes) { continue }
-
-                $message = @{
-                    DriveItemId = $item.id
-                    DriveId     = $driveId
-                    SiteId      = $siteId
-                    Name        = $item.name
-                    SizeMB      = [math]::Round([long]$item.size / 1MB, 2)
-                    SiteUrl     = $siteUrl
-                    LibraryName = $libraryName
-                } | ConvertTo-Json -Compress
-
-                Push-OutputBinding -Name outputQueue -Value $message
-
-                $totalQueued++
-                $targetCount++
-
-                if ($testMode -and $targetCount -ge $testLimit) {
-                    Write-Host "  TEST MODE: Reached limit of $testLimit files"
-                    $uri = $null
-                    break
-                }
-            }
-
-            $uri = $response.'@odata.nextLink'
-
-        } while ($uri)
+        Scan-Folder -FolderUri $rootUri -DriveId $driveId -SiteId $siteId `
+                    -SiteUrl $siteUrl -LibraryName $libraryName `
+                    -MinSizeBytes $minSizeBytes -Count ([ref]$targetCount) -Done ([ref]$done)
 
         Write-Host "  Done - enqueued $targetCount file(s)"
+        $totalQueued += $targetCount
 
         Update-TargetLastCompressed `
             -SiteUrl     $configSiteUrl `
