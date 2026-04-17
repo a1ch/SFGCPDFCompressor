@@ -159,32 +159,33 @@ function Upload-SharePointFile {
         [string]$AccessToken
     )
 
-    # Graph API limit: simple PUT only works up to 4MB.
-    # For anything larger we use an upload session (chunked upload).
-    # We always use the upload session path to keep the code consistent.
+    $fileSize = (Get-Item $FilePath).Length
 
-    $fileSize  = (Get-Item $FilePath).Length
-    $chunkSize = 5 * 1024 * 1024   # 5 MB chunks (must be multiple of 320KB)
+    # 20MB chunks - must be a multiple of 320KB (327680 bytes).
+    # 20MB = 20971520 bytes = 64 * 327680 - valid multiple.
+    # Gives ~100 chunks for a 2GB file vs 400 chunks at 5MB.
+    $chunkSize = 20 * 1024 * 1024
 
-    Write-Host "  Uploading $([math]::Round($fileSize / 1MB, 1)) MB via upload session..."
+    Write-Host "  Uploading $([math]::Round($fileSize / 1GB, 2)) GB via upload session ($([math]::Ceiling($fileSize / $chunkSize)) chunks)..."
 
     # 1. Create upload session
     $sessionUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/createUploadSession"
     $sessionBody = @{ item = @{ "@microsoft.graph.conflictBehavior" = "replace" } } | ConvertTo-Json
     $headers     = Get-GraphHeaders $AccessToken
 
-    $session     = Invoke-RestMethod -Uri $sessionUri -Method POST -Headers $headers -Body $sessionBody
-    $uploadUrl   = $session.uploadUrl
+    $session   = Invoke-RestMethod -Uri $sessionUri -Method POST -Headers $headers -Body $sessionBody
+    $uploadUrl = $session.uploadUrl
 
     if (-not $uploadUrl) {
         throw "Failed to create upload session - no uploadUrl returned"
     }
 
-    # 2. Upload in chunks
+    # 2. Stream file in chunks - never loads more than 20MB into memory at once
     $stream = [System.IO.File]::OpenRead($FilePath)
     try {
-        $offset = 0
-        $buffer = New-Object byte[] $chunkSize
+        $offset    = 0
+        $buffer    = New-Object byte[] $chunkSize
+        $lastLog   = 0
 
         while ($offset -lt $fileSize) {
             $bytesRead = $stream.Read($buffer, 0, $chunkSize)
@@ -199,15 +200,20 @@ function Upload-SharePointFile {
             try {
                 Invoke-RestMethod -Uri $uploadUrl -Method PUT -Headers $chunkHeaders -Body $chunk | Out-Null
             } catch {
-                # 202 Accepted is a success for intermediate chunks — swallow it
-                if ($_.Exception.Response.StatusCode.value__ -notin @(202, 200, 201)) {
+                # 202 Accepted is normal for intermediate chunks
+                if ($_.Exception.Response.StatusCode.value__ -notin @(200, 201, 202)) {
                     throw
                 }
             }
 
             $offset += $bytesRead
+
+            # Log every 10% to avoid flooding the log on a 2GB file
             $pct = [math]::Round($offset * 100 / $fileSize, 0)
-            Write-Host "  Upload progress: $pct% ($([math]::Round($offset/1MB,1)) / $([math]::Round($fileSize/1MB,1)) MB)"
+            if ($pct -ge $lastLog + 10) {
+                Write-Host "  Upload: $pct% ($([math]::Round($offset/1GB,2)) / $([math]::Round($fileSize/1GB,2)) GB)"
+                $lastLog = $pct
+            }
         }
     } finally {
         $stream.Close()
