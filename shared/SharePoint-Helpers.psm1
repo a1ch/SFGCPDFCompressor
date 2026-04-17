@@ -58,7 +58,6 @@ function Get-ListId {
     )
 
     $headers  = Get-GraphHeaders $AccessToken
-    $encoded  = [Uri]::EscapeDataString($ListName)
     $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$filter=displayName eq '$ListName'" -Headers $headers
     $list     = $response.value | Where-Object { $_.displayName -eq $ListName } | Select-Object -First 1
     if (-not $list) { throw "List '$ListName' not found on site $SiteId" }
@@ -278,23 +277,32 @@ function Remove-OldFileVersions {
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
     $versions = $response.value
 
-    if ($versions.Count -le $KeepVersions) {
-        Write-Host "  Only $($versions.Count) version(s) - nothing to clean up"
+    # The current version is always the first in the list (highest version number).
+    # We never delete it - only old versions behind it.
+    # KeepVersions=0 means delete all old versions (keep current only).
+    # KeepVersions=1 means keep 1 old version behind current, etc.
+
+    # Skip the current version (index 0), then skip KeepVersions more
+    $toDelete = $versions | Select-Object -Skip 1 | Select-Object -Skip $KeepVersions
+
+    if ($toDelete.Count -eq 0) {
+        Write-Host "  No old versions to clean up ($($versions.Count) version(s) total)"
         return
     }
-
-    $toDelete = $versions | Sort-Object lastModifiedDateTime -Descending | Select-Object -Skip $KeepVersions
 
     foreach ($version in $toDelete) {
         $versionId = $version.id
         try {
-            Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions/$versionId/restoreVersion" -Method POST -Headers $headers | Out-Null
+            Invoke-RestMethod `
+                -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions/$versionId" `
+                -Method DELETE `
+                -Headers $headers | Out-Null
         } catch {
             Write-Warning "  Could not delete version $versionId`: $_"
         }
     }
 
-    Write-Host "  Cleaned up $($toDelete.Count) old version(s)"
+    Write-Host "  Deleted $($toDelete.Count) old version(s)"
 }
 
 function Write-LogEntry {
