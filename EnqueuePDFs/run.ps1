@@ -10,7 +10,7 @@ param($Timer)
 # CompressPDFs can preserve column metadata.
 # After scanning each library, writes LastCompressed back to
 # the control list row.
-# Sends a summary email via Graph API when done.
+# Sends a summary email with a queued file manifest attached.
 # ============================================================
 
 Import-Module "$PSScriptRoot\..\shared\SharePoint-Helpers.psm1"
@@ -64,10 +64,10 @@ function Scan-Folder {
         [string]$LibraryName,
         [long]$MinSizeBytes,
         [ref]$Count,
-        [ref]$Done
+        [ref]$Done,
+        [ref]$FileLog   # accumulates lines for the attachment
     )
 
-    # Include listItem in $expand so we get the list item ID for metadata preservation
     $headers = @{ Authorization = "Bearer $accessToken" }
     $uri = $FolderUri
 
@@ -81,13 +81,15 @@ function Scan-Folder {
                 $subUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$($item.id)/children?`$select=id,name,size,folder,listItem&`$expand=listItem(`$select=id)&`$top=500"
                 Scan-Folder -FolderUri $subUri -DriveId $DriveId -SiteId $SiteId -ListId $ListId `
                             -SiteUrl $SiteUrl -LibraryName $LibraryName `
-                            -MinSizeBytes $MinSizeBytes -Count $Count -Done $Done
+                            -MinSizeBytes $MinSizeBytes -Count $Count -Done $Done -FileLog $FileLog
                 if ($Done.Value) { return }
                 continue
             }
 
             if (-not ($item.name -like "*.pdf")) { continue }
             if ([long]$item.size -le $MinSizeBytes) { continue }
+
+            $sizeMB = [math]::Round([long]$item.size / 1MB, 2)
 
             $message = @{
                 DriveItemId = $item.id
@@ -96,13 +98,16 @@ function Scan-Folder {
                 ListId      = $ListId
                 ListItemId  = $item.listItem.id
                 Name        = $item.name
-                SizeMB      = [math]::Round([long]$item.size / 1MB, 2)
+                SizeMB      = $sizeMB
                 SiteUrl     = $SiteUrl
                 LibraryName = $LibraryName
             } | ConvertTo-Json -Compress
 
             Push-OutputBinding -Name outputQueue -Value $message
             $Count.Value++
+
+            # Add to file manifest log
+            $FileLog.Value += "$($item.name)`t$sizeMB MB`t$LibraryName`t$SiteUrl`n"
 
             if ($testMode -and $Count.Value -ge $testLimit) {
                 Write-Host "  TEST MODE: Reached limit of $testLimit files"
@@ -136,6 +141,11 @@ if ($targets.Count -eq 0) {
 $totalQueued     = 0
 $targetSummaries = @()
 $skippedCount    = 0
+$fileLog         = "SFGCPDFCompressor - Queued File Manifest`n"
+$fileLog        += "Run: $runDate`n"
+$fileLog        += "=" * 80 + "`n"
+$fileLog        += "File`tSize`tLibrary`tSite`n"
+$fileLog        += "-" * 80 + "`n"
 
 foreach ($target in $targets) {
     $siteUrl        = $target.fields.SiteUrl.Trim()
@@ -149,7 +159,6 @@ foreach ($target in $targets) {
     Write-Host ""
     Write-Host "--- [$label] $siteUrl / $libraryName ---"
 
-    # Skip if LastCompressed is already set
     if ($lastCompressed) {
         Write-Host "  SKIPPED - already compressed on $lastCompressed"
         $skippedCount++
@@ -164,12 +173,11 @@ foreach ($target in $targets) {
         $driveId = Get-DriveId -SiteId $siteId -LibraryName $libraryName -AccessToken $accessToken
         $listId  = Get-ListId -SiteId $siteId -ListName $libraryName -AccessToken $accessToken
 
-        # Include listItem expand from root scan so we get list item IDs
         $rootUri = "https://graph.microsoft.com/v1.0/drives/$driveId/root/children?`$select=id,name,size,folder,listItem&`$expand=listItem(`$select=id)&`$top=500"
 
         Scan-Folder -FolderUri $rootUri -DriveId $driveId -SiteId $siteId -ListId $listId `
                     -SiteUrl $siteUrl -LibraryName $libraryName `
-                    -MinSizeBytes $minSizeBytes -Count ([ref]$targetCount) -Done ([ref]$done)
+                    -MinSizeBytes $minSizeBytes -Count ([ref]$targetCount) -Done ([ref]$done) -FileLog ([ref]$fileLog)
 
         Write-Host "  Done - enqueued $targetCount file(s)"
         $totalQueued += $targetCount
@@ -192,26 +200,33 @@ foreach ($target in $targets) {
     }
 }
 
+$fileLog += "-" * 80 + "`n"
+$fileLog += "Total queued: $totalQueued files`n"
+
 Write-Host ""
 Write-Host "========================================"
 Write-Host "Total enqueued: $totalQueued files"
 Write-Host "Skipped (already compressed): $skippedCount"
 Write-Host "========================================"
 
-# --- Send summary email ---
+# --- Send summary email with manifest attached ---
 try {
-    $htmlBody = Build-SummaryEmailHtml `
-                    -TotalTargets    $targets.Count `
-                    -TotalQueued     $totalQueued `
-                    -TargetSummaries $targetSummaries `
-                    -RunDate         $runDate
+    $htmlBody    = Build-SummaryEmailHtml `
+                        -TotalTargets    $targets.Count `
+                        -TotalQueued     $totalQueued `
+                        -TargetSummaries $targetSummaries `
+                        -RunDate         $runDate
+
+    $attachName  = "queued-files-$((Get-Date).ToString('yyyy-MM-dd')).txt"
 
     Send-SummaryEmail `
-        -GraphToken  $accessToken `
-        -FromAddress $summaryFrom `
-        -ToAddress   $summaryTo `
-        -Subject     "PDF Compressor - Nightly Run $((Get-Date).ToString('yyyy-MM-dd')) - $totalQueued files queued" `
-        -HtmlBody    $htmlBody
+        -GraphToken       $accessToken `
+        -FromAddress      $summaryFrom `
+        -ToAddress        $summaryTo `
+        -Subject          "PDF Compressor - Nightly Run $((Get-Date).ToString('yyyy-MM-dd')) - $totalQueued files queued" `
+        -HtmlBody         $htmlBody `
+        -AttachmentName   $attachName `
+        -AttachmentContent $fileLog
 } catch {
     Write-Warning "Could not send summary email: $_"
 }
