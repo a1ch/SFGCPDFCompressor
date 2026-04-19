@@ -1,6 +1,6 @@
 # Dockerfile for SFGCPDFCompressor
-# Builds on the official Azure Functions PowerShell 7.4 Linux image
-# and permanently installs Ghostscript so profile.ps1 never needs to.
+# Builds on the official Azure Functions PowerShell 7.4 Linux image,
+# permanently installs Ghostscript, and copies all function code in.
 
 FROM mcr.microsoft.com/azure-functions/powershell:4-powershell7.4
 
@@ -12,3 +12,9 @@ RUN apt-get update \
 
 # Verify gs is on PATH (fails the build immediately if install didn't work)
 RUN gs --version
+
+# Copy all function app code into the image
+COPY . /home/site/wwwroot
+
+# Set working directory
+WORKDIR /home/site/wwwroot
