@@ -1,34 +1,17 @@
-# DISABLED - superseded by main_sfgcpdfcompressor3.yml
-name: Build and deploy Powershell project to Azure Function App - sfgccompressor3
+# DISABLED - superseded by main_sfgcpdfcompressor3.yml (Docker + Ghostscript build)
+# This workflow is intentionally set to manual-only and will not run on push.
+name: '[DISABLED] Old deploy - sfgccompressor3'
 
 on:
   workflow_dispatch:
-
-env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
+    inputs:
+      confirm:
+        description: 'This workflow is disabled. Use main_sfgcpdfcompressor3.yml instead.'
+        required: true
 
 jobs:
-  deploy:
+  disabled:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-
     steps:
-      - name: 'Checkout GitHub Action'
-        uses: actions/checkout@v4
-
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_48E012E20D1C4DECBABE4F8DDA50D39A }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_A17DF5D7BE874AEE9BE2C6F517FC9CC0 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_0A4E88758B3047FBB406DC593C1F5194 }}
-
-      - name: 'Run Azure Functions Action'
-        uses: Azure/functions-action@v1
-        id: fa
-        with:
-          app-name: 'sfgccompressor3'
-          slot-name: 'Production'
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+      - name: Disabled
+        run: echo "This workflow is disabled. Use main_sfgcpdfcompressor3.yml instead."
