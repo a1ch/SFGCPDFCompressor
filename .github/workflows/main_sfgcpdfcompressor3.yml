@@ -33,17 +33,9 @@ jobs:
           push: true
           tags: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
 
-      - name: Log in to Azure
-        uses: azure/login@v2
+      - name: Deploy function code via zip deploy
+        uses: azure/functions-action@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Point Function App at custom Docker image
-        run: |
-          az functionapp config container set \
-            --name ${{ env.AZURE_FUNCTIONAPP_NAME }} \
-            --resource-group sfgc_sp_automation \
-            --image ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
-            --registry-server https://${{ secrets.ACR_LOGIN_SERVER }} \
-            --registry-username ${{ secrets.ACR_USERNAME }} \
-            --registry-password ${{ secrets.ACR_PASSWORD }}
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: .
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_3 }}
