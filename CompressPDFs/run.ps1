@@ -20,8 +20,6 @@ $logListName  = $env:LOG_LIST_NAME ?? "SFGCFMCompressorLog"
 $keepVersions = [int]($env:KEEP_VERSIONS ?? "1")
 
 # Parse queue message
-# Azure Functions PowerShell runtime passes QueueItem as an OrderedHashtable
-# when the message is valid JSON - no base64 decoding needed.
 $file = $null
 $typeName = $QueueItem.GetType().FullName
 Write-Host "QueueItem type: $typeName"
@@ -29,13 +27,10 @@ Write-Host "QueueItem type: $typeName"
 if ($QueueItem -is [System.Collections.Hashtable] -or
     $QueueItem -is [System.Management.Automation.PSCustomObject] -or
     $typeName -eq 'System.Management.Automation.OrderedHashtable') {
-    # Already deserialized by the runtime
     $file = $QueueItem
 } elseif ($QueueItem -is [string]) {
-    # Raw string - parse as JSON
     $file = $QueueItem | ConvertFrom-Json
 } else {
-    # Fallback - convert to string and parse
     $rawString = $QueueItem | Out-String
     $file = $rawString.Trim() | ConvertFrom-Json
 }
@@ -68,9 +63,11 @@ try {
     throw
 }
 
+$rand       = [System.IO.Path]::GetRandomFileName()
 $tempDir    = [System.IO.Path]::GetTempPath()
-$tempInput  = Join-Path $tempDir "$driveItemId`_input.pdf"
-$tempOutput = Join-Path $tempDir "$driveItemId`_output.pdf"
+$tempInput  = Join-Path $tempDir "compress_in_$rand.pdf"
+$tempOutput = Join-Path $tempDir "compress_out_$rand.pdf"
+$skipped    = $false
 
 try {
     # 1. Snapshot column metadata BEFORE touching the file
@@ -106,6 +103,7 @@ try {
 
     if ($pct -lt 10) {
         Write-Host "Skipping - less than 10% reduction"
+        $skipped = $true
         return
     }
 
@@ -149,6 +147,8 @@ try {
     Write-Error "Failed: $_"
     throw
 } finally {
+    # Always clean up temp files regardless of success, failure, or skip
     if (Test-Path $tempInput)  { Remove-Item $tempInput  -Force -ErrorAction SilentlyContinue }
     if (Test-Path $tempOutput) { Remove-Item $tempOutput -Force -ErrorAction SilentlyContinue }
+    if ($skipped) { Write-Host "Temp files cleaned up (skipped file)" }
 }
