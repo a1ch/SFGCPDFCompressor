@@ -1,30 +1,25 @@
 # Dockerfile for SFGCPDFCompressor
-# Multi-stage build:
-#   Stage 1 - python:3.11-slim-bullseye matches GLIBC of PS base image (both Bullseye)
-#   Stage 2 - Azure Functions PowerShell image, full Python runtime copied across
-
-FROM python:3.11-slim-bullseye AS python-build
-RUN pip install --no-cache-dir pymupdf img2pdf Pillow
+# Install Python via apt in the final stage (avoids shared library copy guesswork),
+# then pip install our packages. pip is available because we install python3-pip.
+# python3-dev needed for PyMuPDF native extensions.
 
 FROM mcr.microsoft.com/azure-functions/powershell:4-powershell7.4
 
-# Copy full Python runtime from build stage (binary + stdlib + site-packages + shared libs)
-COPY --from=python-build /usr/local/bin/python3.11        /usr/local/bin/python3.11
-COPY --from=python-build /usr/local/lib/python3.11        /usr/local/lib/python3.11
-COPY --from=python-build /usr/local/lib/libpython3.11.so.1.0 /usr/local/lib/libpython3.11.so.1.0
-COPY --from=python-build /usr/lib/x86_64-linux-gnu/libz.so.1         /usr/lib/x86_64-linux-gnu/libz.so.1
-COPY --from=python-build /usr/lib/x86_64-linux-gnu/libexpat.so.1     /usr/lib/x86_64-linux-gnu/libexpat.so.1
-COPY --from=python-build /usr/lib/x86_64-linux-gnu/libffi.so.7       /usr/lib/x86_64-linux-gnu/libffi.so.7
-COPY --from=python-build /usr/lib/x86_64-linux-gnu/libbz2.so.1.0     /usr/lib/x86_64-linux-gnu/libbz2.so.1.0
-COPY --from=python-build /usr/lib/x86_64-linux-gnu/liblzma.so.5      /usr/lib/x86_64-linux-gnu/liblzma.so.5
-COPY --from=python-build /usr/lib/x86_64-linux-gnu/libsqlite3.so.0   /usr/lib/x86_64-linux-gnu/libsqlite3.so.0
+# Install Python 3 + pip via apt - no version mismatch, no missing .so files
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-dev \
+    python3-pip \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 
-# Symlink so 'python' and 'python3' resolve
-RUN ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3 \
- && ln -sf /usr/local/bin/python3.11 /usr/local/bin/python
+# Upgrade pip first, then install packages
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+ && python3 -m pip install --no-cache-dir pymupdf img2pdf Pillow
 
-# Update shared library cache
-RUN ldconfig
+# Symlink so 'python' resolves
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
 
 # Verify all packages load correctly
 RUN python -c "import fitz, img2pdf, PIL; print('PyMuPDF', fitz.version[0], '/ img2pdf / Pillow OK')"
