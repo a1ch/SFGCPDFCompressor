@@ -9,8 +9,8 @@ param($QueueItem)
 # Writes a log entry to SFGCFMCompressorLog after each file.
 # ============================================================
 
-Import-Module "$PSScriptRoot\..\shared\Compress-PDF.psm1"
-Import-Module "$PSScriptRoot\..\shared\SharePoint-Helpers.psm1"
+Import-Module "$PSScriptRoot/../shared/Compress-PDF.psm1"
+Import-Module "$PSScriptRoot/../shared/SharePoint-Helpers.psm1"
 
 $tenantId     = $env:TENANT_ID
 $clientId     = $env:CLIENT_ID
@@ -20,20 +20,29 @@ $logListName  = $env:LOG_LIST_NAME ?? "SFGCFMCompressorLog"
 $keepVersions = [int]($env:KEEP_VERSIONS ?? "1")
 
 # Parse queue message
-# Azure Functions PowerShell passes QueueItem as a string (already decoded from base64 by the runtime)
+# Azure Functions PowerShell runtime passes QueueItem as an OrderedHashtable
+# when the message is valid JSON - no base64 decoding needed.
 $file = $null
-try {
-    # First try: already a hashtable/PSObject from the runtime
-    if ($QueueItem -is [hashtable] -or $QueueItem -is [System.Management.Automation.PSCustomObject]) {
-        $file = $QueueItem
-    } else {
-        # Convert to string and parse as JSON
-        $rawString = $QueueItem | Out-String
-        $file = $rawString | ConvertFrom-Json
-    }
-} catch {
-    Write-Error "Could not parse queue message: $_"
-    throw
+$typeName = $QueueItem.GetType().FullName
+Write-Host "QueueItem type: $typeName"
+
+if ($QueueItem -is [System.Collections.Hashtable] -or
+    $QueueItem -is [System.Management.Automation.PSCustomObject] -or
+    $typeName -eq 'System.Management.Automation.OrderedHashtable') {
+    # Already deserialized by the runtime
+    $file = $QueueItem
+} elseif ($QueueItem -is [string]) {
+    # Raw string - parse as JSON
+    $file = $QueueItem | ConvertFrom-Json
+} else {
+    # Fallback - convert to string and parse
+    $rawString = $QueueItem | Out-String
+    $file = $rawString.Trim() | ConvertFrom-Json
+}
+
+if (-not $file) {
+    Write-Error "Could not parse queue message - file is null after parsing"
+    throw "Queue message parse failed"
 }
 
 $fileName       = $file.Name
