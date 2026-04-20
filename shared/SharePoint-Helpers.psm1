@@ -215,11 +215,12 @@ function Upload-SharePointFile {
         [string]$AccessToken
     )
 
-    $fileSize = (Get-Item $FilePath).Length
-    $chunkSize = 20 * 1024 * 1024
+    $fileSize  = (Get-Item $FilePath).Length
+    $chunkSize = 10 * 1024 * 1024  # 10 MB chunks
 
-    Write-Host "  Uploading $([math]::Round($fileSize / 1GB, 2)) GB via upload session ($([math]::Ceiling($fileSize / $chunkSize)) chunks)..."
+    Write-Host "  Uploading $([math]::Round($fileSize / 1MB, 2)) MB via upload session ($([math]::Ceiling($fileSize / $chunkSize)) chunks)..."
 
+    # Create upload session
     $sessionUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/createUploadSession"
     $sessionBody = @{ item = @{ "@microsoft.graph.conflictBehavior" = "replace" } } | ConvertTo-Json
     $headers     = Get-GraphHeaders $AccessToken
@@ -231,6 +232,10 @@ function Upload-SharePointFile {
         throw "Failed to create upload session - no uploadUrl returned"
     }
 
+    # Use HttpClient to send raw bytes - Invoke-RestMethod re-encodes byte arrays
+    # causing Content-Length to not match Content-Range
+    $httpClient = [System.Net.Http.HttpClient]::new()
+
     $stream = [System.IO.File]::OpenRead($FilePath)
     try {
         $offset  = 0
@@ -239,32 +244,33 @@ function Upload-SharePointFile {
 
         while ($offset -lt $fileSize) {
             $bytesRead = $stream.Read($buffer, 0, $chunkSize)
-            $chunk     = $buffer[0..($bytesRead - 1)]
             $end       = $offset + $bytesRead - 1
 
-            $chunkHeaders = @{
-                "Content-Range" = "bytes $offset-$end/$fileSize"
-                "Content-Type"  = "application/octet-stream"
-            }
+            $content = [System.Net.Http.ByteArrayContent]::new($buffer, 0, $bytesRead)
+            $content.Headers.Add("Content-Range", "bytes $offset-$end/$fileSize")
+            $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("application/octet-stream")
 
-            try {
-                Invoke-RestMethod -Uri $uploadUrl -Method PUT -Headers $chunkHeaders -Body $chunk | Out-Null
-            } catch {
-                if ($_.Exception.Response.StatusCode.value__ -notin @(200, 201, 202)) {
-                    throw
-                }
+            $request         = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Put, $uploadUrl)
+            $request.Content = $content
+
+            $response = $httpClient.SendAsync($request).GetAwaiter().GetResult()
+
+            if (-not $response.IsSuccessStatusCode -and [int]$response.StatusCode -notin @(200, 201, 202)) {
+                $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                throw "Upload chunk failed ($([int]$response.StatusCode)): $body"
             }
 
             $offset += $bytesRead
 
             $pct = [math]::Round($offset * 100 / $fileSize, 0)
             if ($pct -ge $lastLog + 10) {
-                Write-Host "  Upload: $pct% ($([math]::Round($offset/1GB,2)) / $([math]::Round($fileSize/1GB,2)) GB)"
+                Write-Host "  Upload: $pct% ($([math]::Round($offset/1MB,2)) / $([math]::Round($fileSize/1MB,2)) MB)"
                 $lastLog = $pct
             }
         }
     } finally {
         $stream.Close()
+        $httpClient.Dispose()
     }
 
     Write-Host "  Upload complete"
