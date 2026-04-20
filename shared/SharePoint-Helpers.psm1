@@ -150,6 +150,7 @@ function Get-FileMetadata {
     $uri      = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId/fields"
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
 
+    # System fields + all known read-only/calculated SharePoint fields
     $systemFields = @(
         'id', 'ID', 'Title', 'Created', 'Modified', 'AuthorLookupId', 'EditorLookupId',
         'FileLeafRef', 'FileDirRef', 'FileRef', 'FSObjType', 'ContentTypeId',
@@ -158,7 +159,15 @@ function Get-FileMetadata {
         'SMTotalSize', 'SMLastModifiedDate', 'SMTotalFileStreamSize', 'SMTotalFileCount',
         '_ComplianceFlags', '_ComplianceTag', '_ComplianceTagWrittenTime', '_ComplianceTagUserId',
         'AccessPolicy', '_VirusStatus', '_VirusVendorID', '_VirusInfo',
-        'AppAuthorLookupId', 'AppEditorLookupId'
+        'AppAuthorLookupId', 'AppEditorLookupId',
+        # Read-only calculated file fields
+        'FileSizeDisplay', 'FileSize', 'File_x0020_Size',
+        'CheckoutUser', 'CheckedOutUserId', 'IsCheckedoutToLocal',
+        'UniqueId', 'SyncClientId', 'ProgId', 'ScopeId',
+        'HTML_x0020_File_x0020_Type', 'MetaInfo',
+        'owshiddenversion', 'WorkflowVersion', 'WorkflowInstanceID',
+        'ParentVersionString', 'ParentLeafName',
+        'ContentVersion', 'UIVersion', 'UIVersionString'
     )
 
     $metadata = @{}
@@ -166,6 +175,7 @@ function Get-FileMetadata {
         $_.Name -notin $systemFields -and
         $_.Name -notmatch '^_' -and
         $_.Name -notmatch 'LookupId$' -and
+        $_.Name -notmatch 'Display$' -and
         $null -ne $_.Value
     } | ForEach-Object {
         $metadata[$_.Name] = $_.Value
