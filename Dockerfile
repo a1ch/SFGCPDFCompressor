@@ -4,17 +4,16 @@
 
 FROM mcr.microsoft.com/azure-functions/powershell:4-powershell7.4
 
-# Install Python3, pip, and dependencies
+# Install Python3 and pip
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
-    python3-pil \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# Install PyMuPDF and img2pdf
-RUN pip3 install --no-cache-dir --break-system-packages pymupdf img2pdf Pillow
+# Install PyMuPDF, img2pdf, and Pillow via pip
+RUN pip3 install --no-cache-dir pymupdf img2pdf Pillow
 
 # Verify installs
 RUN python3 -c "import fitz, img2pdf, PIL; print('PyMuPDF', fitz.version[0], '/ img2pdf / Pillow OK')"
