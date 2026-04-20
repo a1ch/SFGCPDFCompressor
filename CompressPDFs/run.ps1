@@ -7,6 +7,8 @@ param($QueueItem)
 # Reads SharePoint column metadata before upload and restores
 # it after so custom columns are never lost.
 # Writes a log entry to SFGCFMCompressorLog after each file.
+# Token is refreshed after compression so it never expires
+# during the upload step.
 # ============================================================
 
 Import-Module "$PSScriptRoot/../shared/Compress-PDF.psm1"
@@ -56,13 +58,6 @@ Write-Host "Site:       $siteUrl"
 Write-Host "Library:    $libraryName"
 Write-Host "========================================"
 
-try {
-    $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
-} catch {
-    Write-Error "Authentication failed: $_"
-    throw
-}
-
 $rand       = [System.IO.Path]::GetRandomFileName()
 $tempDir    = [System.IO.Path]::GetTempPath()
 $tempInput  = Join-Path $tempDir "compress_in_$rand.pdf"
@@ -70,7 +65,11 @@ $tempOutput = Join-Path $tempDir "compress_out_$rand.pdf"
 $skipped    = $false
 
 try {
-    # 1. Snapshot column metadata BEFORE touching the file
+    # 1. Get fresh token for download + metadata
+    $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+    Write-Host "Token acquired"
+
+    # 2. Snapshot column metadata BEFORE touching the file
     $metadata = @{}
     if ($listId -and $listItemId) {
         Write-Host "Reading column metadata..."
@@ -84,7 +83,7 @@ try {
         Write-Warning "  No ListId/ListItemId in queue message - column metadata will not be preserved"
     }
 
-    # 2. Download from SharePoint via Graph
+    # 3. Download from SharePoint via Graph
     Write-Host "Downloading from SharePoint..."
     Download-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                             -DestinationPath $tempInput -AccessToken $accessToken
@@ -92,7 +91,7 @@ try {
     $downloadedSize = (Get-Item $tempInput).Length
     Write-Host "Downloaded: $([math]::Round($downloadedSize / 1MB, 2)) MB"
 
-    # 3. Compress
+    # 4. Compress (this can take 2-3 minutes - token will expire during this step)
     Write-Host "Compressing..."
     Compress-PDFFile -InputPath $tempInput -OutputPath $tempOutput | Out-Null
 
@@ -107,12 +106,16 @@ try {
         return
     }
 
-    # 4. Upload compressed file back to SharePoint
+    # 5. Refresh token before upload - compression takes long enough to expire the old one
+    Write-Host "Refreshing token before upload..."
+    $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+
+    # 6. Upload compressed file back to SharePoint
     Write-Host "Replacing file in SharePoint..."
     Upload-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                           -FilePath $tempOutput -AccessToken $accessToken
 
-    # 5. Restore column metadata immediately after upload
+    # 7. Restore column metadata immediately after upload
     if ($listId -and $listItemId -and $metadata.Count -gt 0) {
         Write-Host "Restoring column metadata..."
         try {
@@ -128,7 +131,7 @@ try {
 
     Write-Host "Done - saved $savedMB MB"
 
-    # 6. Write log entry
+    # 8. Write log entry
     if ($logSiteUrl) {
         Write-LogEntry `
             -SiteUrl          $logSiteUrl `
