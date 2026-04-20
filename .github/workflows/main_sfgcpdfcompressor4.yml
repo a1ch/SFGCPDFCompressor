@@ -1,6 +1,6 @@
-# Deploy to sfgcpdfcompressor4 (Container Image mode - Ghostscript pre-installed)
+# Deploy to sfgcpdfcompressor4 (Container Image mode)
 # Builds and pushes Docker image to ACR on every push to main.
-# The function app pulls the latest image automatically via continuous deployment.
+# --provenance=false avoids extra manifest HEAD requests that fail on idle ACR.
 name: Build and deploy Docker image to Azure Function App - sfgcpdfcompressor4
 
 on:
@@ -29,8 +29,14 @@ jobs:
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: nick-fields/retry@v3
         with:
-          context: .
-          push: true
-          tags: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          timeout_minutes: 15
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            docker buildx build \
+              --provenance=false \
+              --push \
+              --tag ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
+              .
