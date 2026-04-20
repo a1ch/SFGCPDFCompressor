@@ -1,22 +1,10 @@
-# profile.ps1 - runs on Function App startup (EP2 Linux)
-# Installs Ghostscript without sudo - EP2 Linux containers run as root
-# so sudo is not available but apt-get works directly.
+# profile.ps1 - runs on Function App startup
+# Compression now uses Python/PyMuPDF/img2pdf (baked into Docker image).
+# Just verify Python is available.
 
-Write-Host "Checking Ghostscript..."
-$gs = Get-Command "gs" -ErrorAction SilentlyContinue
-
-if ($gs) {
-    Write-Host "Ghostscript ready at $($gs.Source)"
+$python = Get-Command "python" -ErrorAction SilentlyContinue
+if ($python) {
+    Write-Host "Python ready at $($python.Source)"
 } else {
-    Write-Host "Ghostscript not found - attempting install (no sudo)..."
-
-    $result = bash -c "apt-get update -qq && apt-get install -y --no-install-recommends ghostscript 2>&1"
-    Write-Host $result
-
-    $gs = Get-Command "gs" -ErrorAction SilentlyContinue
-    if ($gs) {
-        Write-Host "Ghostscript installed successfully at $($gs.Source)"
-    } else {
-        Write-Warning "Ghostscript installation failed. CompressPDFs will not be able to compress files. EnqueuePDFs will continue normally."
-    }
+    Write-Warning "Python not found. CompressPDFs will fail. Ensure Docker image is built correctly."
 }
