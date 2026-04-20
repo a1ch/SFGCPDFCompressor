@@ -1,9 +1,9 @@
 # Dockerfile for SFGCPDFCompressor
 # Multi-stage build:
-#   Stage 1 - use Python 3.11 image to install pymupdf/img2pdf/Pillow cleanly
-#   Stage 2 - Azure Functions PowerShell image as final base, copy Python across
+#   Stage 1 - python:3.11-slim-bullseye matches the GLIBC version of the PS base image
+#   Stage 2 - Azure Functions PowerShell image, Python copied across cleanly
 
-FROM python:3.11-slim AS python-build
+FROM python:3.11-slim-bullseye AS python-build
 RUN pip install --no-cache-dir pymupdf img2pdf Pillow
 
 FROM mcr.microsoft.com/azure-functions/powershell:4-powershell7.4
