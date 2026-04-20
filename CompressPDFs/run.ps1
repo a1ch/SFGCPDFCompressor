@@ -19,18 +19,21 @@ $logSiteUrl   = $env:CONFIG_SITE_URL
 $logListName  = $env:LOG_LIST_NAME ?? "SFGCFMCompressorLog"
 $keepVersions = [int]($env:KEEP_VERSIONS ?? "1")
 
-# Parse queue message - Azure may base64 encode it
-$rawMessage = $QueueItem
+# Parse queue message
+# Azure Functions PowerShell passes QueueItem as a string (already decoded from base64 by the runtime)
+$file = $null
 try {
-    $file = $rawMessage | ConvertFrom-Json
-} catch {
-    try {
-        $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($rawMessage))
-        $file = $decoded | ConvertFrom-Json
-    } catch {
-        Write-Error "Could not parse queue message: $rawMessage"
-        throw
+    # First try: already a hashtable/PSObject from the runtime
+    if ($QueueItem -is [hashtable] -or $QueueItem -is [System.Management.Automation.PSCustomObject]) {
+        $file = $QueueItem
+    } else {
+        # Convert to string and parse as JSON
+        $rawString = $QueueItem | Out-String
+        $file = $rawString | ConvertFrom-Json
     }
+} catch {
+    Write-Error "Could not parse queue message: $_"
+    throw
 }
 
 $fileName       = $file.Name
