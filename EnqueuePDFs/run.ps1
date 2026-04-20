@@ -13,8 +13,8 @@ param($Timer)
 # Sends a summary email with a queued file manifest attached.
 # ============================================================
 
-Import-Module "$PSScriptRoot\..\shared\SharePoint-Helpers.psm1"
-Import-Module "$PSScriptRoot\..\shared\Graph-Helpers.psm1"
+Import-Module "$PSScriptRoot/../shared/SharePoint-Helpers.psm1"
+Import-Module "$PSScriptRoot/../shared/Graph-Helpers.psm1"
 
 $tenantId     = $env:TENANT_ID
 $clientId     = $env:CLIENT_ID
