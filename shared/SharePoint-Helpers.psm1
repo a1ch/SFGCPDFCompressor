@@ -138,6 +138,62 @@ function Update-TargetLastCompressed {
     }
 }
 
+function Get-FileMetadata {
+    param(
+        [string]$SiteId,
+        [string]$ListId,
+        [string]$ItemId,
+        [string]$AccessToken
+    )
+
+    $headers  = Get-GraphHeaders $AccessToken
+    $uri      = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId/fields"
+    $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+
+    # Filter out system/read-only fields - only keep custom business columns
+    $systemFields = @(
+        'id', 'ID', 'Title', 'Created', 'Modified', 'AuthorLookupId', 'EditorLookupId',
+        'FileLeafRef', 'FileDirRef', 'FileRef', 'FSObjType', 'ContentTypeId',
+        '_UIVersionString', '_UIVersion', 'Edit', 'LinkFilenameNoMenu', 'LinkFilename',
+        'DocIcon', 'SelectTitle', 'SelectFilename', 'ItemChildCount', 'FolderChildCount',
+        'SMTotalSize', 'SMLastModifiedDate', 'SMTotalFileStreamSize', 'SMTotalFileCount',
+        '_ComplianceFlags', '_ComplianceTag', '_ComplianceTagWrittenTime', '_ComplianceTagUserId',
+        'AccessPolicy', '_VirusStatus', '_VirusVendorID', '_VirusInfo',
+        'AppAuthorLookupId', 'AppEditorLookupId'
+    )
+
+    $metadata = @{}
+    $response.PSObject.Properties | Where-Object {
+        $_.Name -notin $systemFields -and
+        $_.Name -notmatch '^_' -and
+        $_.Name -notmatch 'LookupId$' -and
+        $null -ne $_.Value
+    } | ForEach-Object {
+        $metadata[$_.Name] = $_.Value
+    }
+
+    return $metadata
+}
+
+function Set-FileMetadata {
+    param(
+        [string]$SiteId,
+        [string]$ListId,
+        [string]$ItemId,
+        [hashtable]$Metadata,
+        [string]$AccessToken
+    )
+
+    if ($Metadata.Count -eq 0) { return }
+
+    $headers = Get-GraphHeaders $AccessToken
+    $uri     = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId/fields"
+    $body    = $Metadata | ConvertTo-Json -Depth 4
+
+    Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null
+    Write-Host "  Metadata restored ($($Metadata.Count) field(s))"
+}
+
 function Download-SharePointFile {
     param(
         [string]$DriveId,
@@ -160,15 +216,10 @@ function Upload-SharePointFile {
     )
 
     $fileSize = (Get-Item $FilePath).Length
-
-    # 20MB chunks - must be a multiple of 320KB (327680 bytes).
-    # 20MB = 20971520 bytes = 64 * 327680 - valid multiple.
-    # Gives ~100 chunks for a 2GB file vs 400 chunks at 5MB.
     $chunkSize = 20 * 1024 * 1024
 
     Write-Host "  Uploading $([math]::Round($fileSize / 1GB, 2)) GB via upload session ($([math]::Ceiling($fileSize / $chunkSize)) chunks)..."
 
-    # 1. Create upload session
     $sessionUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/createUploadSession"
     $sessionBody = @{ item = @{ "@microsoft.graph.conflictBehavior" = "replace" } } | ConvertTo-Json
     $headers     = Get-GraphHeaders $AccessToken
@@ -180,12 +231,11 @@ function Upload-SharePointFile {
         throw "Failed to create upload session - no uploadUrl returned"
     }
 
-    # 2. Stream file in chunks - never loads more than 20MB into memory at once
     $stream = [System.IO.File]::OpenRead($FilePath)
     try {
-        $offset    = 0
-        $buffer    = New-Object byte[] $chunkSize
-        $lastLog   = 0
+        $offset  = 0
+        $buffer  = New-Object byte[] $chunkSize
+        $lastLog = 0
 
         while ($offset -lt $fileSize) {
             $bytesRead = $stream.Read($buffer, 0, $chunkSize)
@@ -200,7 +250,6 @@ function Upload-SharePointFile {
             try {
                 Invoke-RestMethod -Uri $uploadUrl -Method PUT -Headers $chunkHeaders -Body $chunk | Out-Null
             } catch {
-                # 202 Accepted is normal for intermediate chunks
                 if ($_.Exception.Response.StatusCode.value__ -notin @(200, 201, 202)) {
                     throw
                 }
@@ -208,7 +257,6 @@ function Upload-SharePointFile {
 
             $offset += $bytesRead
 
-            # Log every 10% to avoid flooding the log on a 2GB file
             $pct = [math]::Round($offset * 100 / $fileSize, 0)
             if ($pct -ge $lastLog + 10) {
                 Write-Host "  Upload: $pct% ($([math]::Round($offset/1GB,2)) / $([math]::Round($fileSize/1GB,2)) GB)"
@@ -235,8 +283,6 @@ function Remove-OldFileVersions {
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
     $versions = $response.value
 
-    # Current version is always first. Never delete it.
-    # KeepVersions=0 = current only, KeepVersions=1 = current + 1 previous, etc.
     $toDelete = $versions | Select-Object -Skip 1 | Select-Object -Skip $KeepVersions
 
     if ($toDelete.Count -eq 0) {
