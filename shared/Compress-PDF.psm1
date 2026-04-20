@@ -12,9 +12,10 @@ function Compress-PDFFile {
         [string]$Mode = "bw"          # bw = 1-bit black & white (text), gray = 8-bit grayscale (photos)
     )
 
-    $python = (Get-Command "python3" -ErrorAction SilentlyContinue)?.Source
-    if (-not $python) {
-        throw "python3 not found. Ensure it is installed in the Docker image."
+    # Use venv python directly - PATH may not carry through to PowerShell child processes
+    $python = "/opt/pdfvenv/bin/python"
+    if (-not (Test-Path $python)) {
+        throw "Python venv not found at $python. Ensure the Docker image was built correctly."
     }
 
     Write-Host "  Compressing: $InputPath -> $OutputPath (target width: ${TargetWidth}px, mode: $Mode)"
