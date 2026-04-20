@@ -5,13 +5,12 @@ function Compress-PDFFile {
     param(
         [string]$InputPath,
         [string]$OutputPath,
-        [string]$Quality = "ebook"   # screen=72dpi, ebook=150dpi, printer=300dpi
+        [string]$Quality = "screen"   # screen=72dpi, ebook=150dpi, printer=300dpi
     )
 
-    # On Linux, gs is installed via apt-get in profile.ps1
     $gsPath = (Get-Command "gs" -ErrorAction SilentlyContinue)?.Source
     if (-not $gsPath) {
-        throw "Ghostscript (gs) not found. Ensure profile.ps1 ran successfully."
+        throw "Ghostscript (gs) not found. Ensure it is installed in the Docker image."
     }
 
     Write-Host "  Using Ghostscript: $gsPath"
@@ -23,9 +22,16 @@ function Compress-PDFFile {
         "-dNOPAUSE",
         "-dQUIET",
         "-dBATCH",
-        "-dColorImageResolution=150",
-        "-dGrayImageResolution=150",
+        "-dCompressFonts=true",
+        "-dSubsetFonts=true",
+        "-dEmbedAllFonts=false",
+        "-dColorImageDownsampleType=/Bicubic",
+        "-dGrayImageDownsampleType=/Bicubic",
+        "-dColorImageResolution=96",
+        "-dGrayImageResolution=96",
         "-dMonoImageResolution=150",
+        "-dColorImageDownsampleThreshold=1.0",
+        "-dGrayImageDownsampleThreshold=1.0",
         "-sOutputFile=$OutputPath",
         $InputPath
     )
