@@ -299,7 +299,8 @@ function Remove-OldFileVersions {
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
     $versions = $response.value
 
-    $toDelete = $versions | Select-Object -Skip 1 | Select-Object -Skip $KeepVersions
+    # versions is ordered newest-first; skip the top $KeepVersions and delete the rest
+    $toDelete = $versions | Select-Object -Skip $KeepVersions
 
     if ($toDelete.Count -eq 0) {
         Write-Host "  No old versions to clean up ($($versions.Count) version(s) total)"
