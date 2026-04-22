@@ -1,78 +1,44 @@
 # Remove-OldVersions.ps1
 # One-off tool to delete old SharePoint file versions from all compressed libraries.
-# Uses device code flow - authenticates as YOUR account, no app registration needed.
+# Authenticates using app registration client credentials (same as the function app).
+# Token is refreshed before each library to handle long runs without expiry.
 #
 # Usage:
 #   .\Remove-OldVersions.ps1
 #   .\Remove-OldVersions.ps1 -KeepVersions 1 -WhatIf   # dry run
 #
 # Requirements:
-#   - Your account must have access to the SharePoint sites in the config list
-#   - Client ID from your existing app registration (no secret needed)
 #   - PowerShell 5.1+
+#   - TENANT_ID, CLIENT_ID, CLIENT_SECRET env vars (or it will prompt)
 
 param(
-    [int]$KeepVersions  = 1,
+    [int]$KeepVersions = 1,
     [switch]$WhatIf
 )
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-if ($env:TENANT_ID)       { $TenantId       = $env:TENANT_ID       } else { $TenantId       = Read-Host "Tenant ID" }
-if ($env:CLIENT_ID)       { $ClientId       = $env:CLIENT_ID       } else { $ClientId       = Read-Host "Client ID (app registration)" }
-if ($env:CONFIG_SITE_URL) { $ConfigSiteUrl  = $env:CONFIG_SITE_URL } else { $ConfigSiteUrl  = Read-Host "Config site URL (e.g. https://streamflogroup.sharepoint.com/itsp)" }
-if ($env:CONFIG_LIST_NAME){ $ConfigListName = $env:CONFIG_LIST_NAME} else { $ConfigListName = "SFGCFMCompressor" }
+if ($env:TENANT_ID)        { $TenantId       = $env:TENANT_ID        } else { $TenantId       = Read-Host "Tenant ID" }
+if ($env:CLIENT_ID)        { $ClientId       = $env:CLIENT_ID        } else { $ClientId       = Read-Host "Client ID" }
+if ($env:CLIENT_SECRET)    { $ClientSecret   = $env:CLIENT_SECRET    } else { $ClientSecret   = Read-Host "Client Secret" }
+if ($env:CONFIG_SITE_URL)  { $ConfigSiteUrl  = $env:CONFIG_SITE_URL  } else { $ConfigSiteUrl  = Read-Host "Config site URL (e.g. https://streamflogroup.sharepoint.com/itsp)" }
+if ($env:CONFIG_LIST_NAME) { $ConfigListName = $env:CONFIG_LIST_NAME } else { $ConfigListName = "SFGCFMCompressor" }
 # ─────────────────────────────────────────────────────────────────────────────
 
-function Get-DeviceCodeToken {
-    param([string]$TenantId, [string]$ClientId)
+function Get-AppToken {
+    param([string]$TenantId, [string]$ClientId, [string]$ClientSecret)
 
-    $scope = "https://graph.microsoft.com/Sites.ReadWrite.All offline_access"
-
-    # Request device code
-    $dcResponse = Invoke-RestMethod `
-        -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode" `
+    $response = Invoke-RestMethod `
+        -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
         -Method POST `
-        -Body @{ client_id = $ClientId; scope = $scope } `
+        -Body @{
+            grant_type    = "client_credentials"
+            client_id     = $ClientId
+            client_secret = $ClientSecret
+            scope         = "https://graph.microsoft.com/.default"
+        } `
         -ContentType "application/x-www-form-urlencoded"
 
-    Write-Host ""
-    Write-Host "=============================================="
-    Write-Host $dcResponse.message
-    Write-Host "=============================================="
-    Write-Host ""
-
-    # Poll for token
-    if ($dcResponse.interval)   { $interval  = $dcResponse.interval   } else { $interval  = 5   }
-    if ($dcResponse.expires_in) { $expiresIn = $dcResponse.expires_in } else { $expiresIn = 900 }
-    $deadline = (Get-Date).AddSeconds($expiresIn)
-
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds $interval
-        try {
-            $tokenResponse = Invoke-RestMethod `
-                -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
-                -Method POST `
-                -Body @{
-                    grant_type  = "urn:ietf:params:oauth:grant-type:device_code"
-                    client_id   = $ClientId
-                    device_code = $dcResponse.device_code
-                } `
-                -ContentType "application/x-www-form-urlencoded" `
-                -ErrorAction Stop
-
-            Write-Host "Authenticated successfully`n"
-            return $tokenResponse.access_token
-        } catch {
-            $err = $null
-            try { $err = $_.ErrorDetails.Message | ConvertFrom-Json } catch {}
-            if ($err -and $err.error -eq "authorization_pending") { continue }
-            if ($err -and $err.error -eq "authorization_declined") { throw "Authentication declined by user." }
-            if ($err -and $err.error -eq "expired_token")          { throw "Device code expired. Please re-run the script." }
-            throw $_
-        }
-    }
-
-    throw "Timed out waiting for authentication."
+    return $response.access_token
 }
 
 function Get-GraphHeaders {
@@ -157,10 +123,11 @@ function Remove-OldVersions {
 
 if ($WhatIf) { Write-Host "*** DRY RUN MODE - no versions will be deleted ***`n" -ForegroundColor Yellow }
 
-Write-Host "Authenticating as your account via device code flow..."
-$token = Get-DeviceCodeToken -TenantId $TenantId -ClientId $ClientId
+# Read config list using a fresh token
+Write-Host "Authenticating..."
+$token = Get-AppToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+Write-Host "Authenticated successfully`n"
 
-# Read config list
 Write-Host "Reading compression targets from '$ConfigListName'..."
 $configSiteId = Get-SiteId -SiteUrl $ConfigSiteUrl -Token $token
 $configListId = Get-ListId -SiteId $configSiteId -ListName $ConfigListName -Token $token
@@ -188,6 +155,10 @@ foreach ($target in $targets) {
     Write-Host "Library: $label"
     Write-Host "  Site:    $siteUrl"
     Write-Host "  Library: $libraryName"
+
+    # Refresh token before each library - runs can take hours and tokens expire after 1 hour
+    Write-Host "  Refreshing token..."
+    $token = Get-AppToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
 
     try {
         $siteId  = Get-SiteId -SiteUrl $siteUrl -Token $token
