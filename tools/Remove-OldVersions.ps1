@@ -8,9 +8,8 @@
 #
 # Requirements:
 #   - Your account must have access to the SharePoint sites in the config list
-#   - An Azure AD app registration with delegated Sites.ReadWrite.All is needed
-#     for the device code flow (use the existing one, or a public client app)
-#   - PowerShell 7+
+#   - Client ID from your existing app registration (no secret needed)
+#   - PowerShell 5.1+
 
 param(
     [int]$KeepVersions  = 1,
@@ -18,11 +17,10 @@ param(
 )
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-# These match your existing Function App settings
-$TenantId       = $env:TENANT_ID       ?? (Read-Host "Tenant ID")
-$ClientId       = $env:CLIENT_ID       ?? (Read-Host "Client ID (app registration)")
-$ConfigSiteUrl  = $env:CONFIG_SITE_URL  ?? (Read-Host "Config site URL (e.g. https://streamflogroup.sharepoint.com/itsp)")
-$ConfigListName = $env:CONFIG_LIST_NAME ?? "SFGCFMCompressor"
+if ($env:TENANT_ID)       { $TenantId       = $env:TENANT_ID       } else { $TenantId       = Read-Host "Tenant ID" }
+if ($env:CLIENT_ID)       { $ClientId       = $env:CLIENT_ID       } else { $ClientId       = Read-Host "Client ID (app registration)" }
+if ($env:CONFIG_SITE_URL) { $ConfigSiteUrl  = $env:CONFIG_SITE_URL } else { $ConfigSiteUrl  = Read-Host "Config site URL (e.g. https://streamflogroup.sharepoint.com/itsp)" }
+if ($env:CONFIG_LIST_NAME){ $ConfigListName = $env:CONFIG_LIST_NAME} else { $ConfigListName = "SFGCFMCompressor" }
 # ─────────────────────────────────────────────────────────────────────────────
 
 function Get-DeviceCodeToken {
@@ -44,9 +42,9 @@ function Get-DeviceCodeToken {
     Write-Host ""
 
     # Poll for token
-    $interval  = $dcResponse.interval ?? 5
-    $expiresIn = $dcResponse.expires_in ?? 900
-    $deadline  = (Get-Date).AddSeconds($expiresIn)
+    if ($dcResponse.interval)   { $interval  = $dcResponse.interval   } else { $interval  = 5   }
+    if ($dcResponse.expires_in) { $expiresIn = $dcResponse.expires_in } else { $expiresIn = 900 }
+    $deadline = (Get-Date).AddSeconds($expiresIn)
 
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds $interval
@@ -55,20 +53,21 @@ function Get-DeviceCodeToken {
                 -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" `
                 -Method POST `
                 -Body @{
-                    grant_type   = "urn:ietf:params:oauth:grant-type:device_code"
-                    client_id    = $ClientId
-                    device_code  = $dcResponse.device_code
+                    grant_type  = "urn:ietf:params:oauth:grant-type:device_code"
+                    client_id   = $ClientId
+                    device_code = $dcResponse.device_code
                 } `
                 -ContentType "application/x-www-form-urlencoded" `
                 -ErrorAction Stop
 
-            Write-Host "✅ Authenticated successfully`n"
+            Write-Host "Authenticated successfully`n"
             return $tokenResponse.access_token
         } catch {
-            $err = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
-            if ($err.error -eq "authorization_pending") { continue }
-            if ($err.error -eq "authorization_declined") { throw "Authentication declined by user." }
-            if ($err.error -eq "expired_token")          { throw "Device code expired. Please re-run the script." }
+            $err = $null
+            try { $err = $_.ErrorDetails.Message | ConvertFrom-Json } catch {}
+            if ($err -and $err.error -eq "authorization_pending") { continue }
+            if ($err -and $err.error -eq "authorization_declined") { throw "Authentication declined by user." }
+            if ($err -and $err.error -eq "expired_token")          { throw "Device code expired. Please re-run the script." }
             throw $_
         }
     }
@@ -76,46 +75,52 @@ function Get-DeviceCodeToken {
     throw "Timed out waiting for authentication."
 }
 
-function Get-GraphHeaders { param([string]$Token)
+function Get-GraphHeaders {
+    param([string]$Token)
     return @{ Authorization = "Bearer $Token"; "Content-Type" = "application/json" }
 }
 
-function Get-SiteId { param([string]$SiteUrl, [string]$Token)
+function Get-SiteId {
+    param([string]$SiteUrl, [string]$Token)
     $uri  = [Uri]$SiteUrl
     $resp = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$($uri.Host):$($uri.AbsolutePath.TrimEnd('/'))" -Headers (Get-GraphHeaders $Token)
     return $resp.id
 }
 
-function Get-ListId { param([string]$SiteId, [string]$ListName, [string]$Token)
+function Get-ListId {
+    param([string]$SiteId, [string]$ListName, [string]$Token)
     $resp = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$filter=displayName eq '$ListName'" -Headers (Get-GraphHeaders $Token)
     $list = $resp.value | Where-Object { $_.displayName -eq $ListName } | Select-Object -First 1
     if (-not $list) { throw "List '$ListName' not found on site $SiteId" }
     return $list.id
 }
 
-function Get-DriveId { param([string]$SiteId, [string]$LibraryName, [string]$Token)
+function Get-DriveId {
+    param([string]$SiteId, [string]$LibraryName, [string]$Token)
     $resp  = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers (Get-GraphHeaders $Token)
     $drive = $resp.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
     if (-not $drive) { throw "Library '$LibraryName' not found on site $SiteId" }
     return $drive.id
 }
 
-function Get-AllDriveItems { param([string]$DriveId, [string]$Token)
+function Get-AllDriveItems {
+    param([string]$DriveId, [string]$Token)
     $headers  = Get-GraphHeaders $Token
     $allItems = @()
-    $nextUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/root/search(q='')?" +
-                "`$select=id,name,file,size&`$top=500"
+    $nextUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/root/search(q='')?`$select=id,name,file,size&`$top=500"
 
     do {
         $resp     = Invoke-RestMethod -Uri $nextUri -Headers $headers
-        $allItems += $resp.value | Where-Object { $_.file }  # files only, skip folders
+        $allItems += $resp.value | Where-Object { $_.file }
         $nextUri  = $resp.'@odata.nextLink'
     } while ($nextUri)
 
     return $allItems
 }
 
-function Remove-OldVersions { param([string]$DriveId, [string]$ItemId, [string]$ItemName, [string]$Token, [int]$Keep, [bool]$DryRun)
+function Remove-OldVersions {
+    param([string]$DriveId, [string]$ItemId, [string]$ItemName, [string]$Token, [int]$Keep, [bool]$DryRun)
+
     $headers  = Get-GraphHeaders $Token
     $resp     = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$ItemId/versions" -Headers $headers
     $versions = $resp.value  # newest first
@@ -128,7 +133,7 @@ function Remove-OldVersions { param([string]$DriveId, [string]$ItemId, [string]$
     $toDelete = $versions | Select-Object -Skip $Keep
 
     if ($DryRun) {
-        Write-Host "  DRYRUN  $ItemName — would delete $($toDelete.Count) version(s) (keeping $Keep)"
+        Write-Host "  DRYRUN  $ItemName - would delete $($toDelete.Count) version(s) (keeping $Keep)"
         return $toDelete.Count
     }
 
@@ -144,7 +149,7 @@ function Remove-OldVersions { param([string]$DriveId, [string]$ItemId, [string]$
         }
     }
 
-    Write-Host "  DONE  $ItemName — deleted $deleted version(s)"
+    Write-Host "  DONE  $ItemName - deleted $deleted version(s)"
     return $deleted
 }
 
@@ -160,8 +165,8 @@ Write-Host "Reading compression targets from '$ConfigListName'..."
 $configSiteId = Get-SiteId -SiteUrl $ConfigSiteUrl -Token $token
 $configListId = Get-ListId -SiteId $configSiteId -ListName $ConfigListName -Token $token
 
-$items    = @()
-$nextUri  = "https://graph.microsoft.com/v1.0/sites/$configSiteId/lists/$configListId/items?`$expand=fields&`$top=500"
+$items   = @()
+$nextUri = "https://graph.microsoft.com/v1.0/sites/$configSiteId/lists/$configListId/items?`$expand=fields&`$top=500"
 do {
     $resp    = Invoke-RestMethod -Uri $nextUri -Headers (Get-GraphHeaders $token)
     $items  += $resp.value
@@ -177,9 +182,9 @@ $totalFiles   = 0
 foreach ($target in $targets) {
     $siteUrl     = $target.fields.SiteUrl
     $libraryName = $target.fields.LibraryName
-    $label       = $target.fields.Title ?? "$siteUrl / $libraryName"
+    if ($target.fields.Title) { $label = $target.fields.Title } else { $label = "$siteUrl / $libraryName" }
 
-    Write-Host "────────────────────────────────────────"
+    Write-Host "----------------------------------------"
     Write-Host "Library: $label"
     Write-Host "  Site:    $siteUrl"
     Write-Host "  Library: $libraryName"
