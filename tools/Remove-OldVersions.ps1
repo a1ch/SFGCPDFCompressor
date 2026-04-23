@@ -20,11 +20,11 @@
 # Usage:
 #   .\Remove-OldVersions.ps1                        # skip libraries already cleaned
 #   .\Remove-OldVersions.ps1 -Force                 # rescan everything, ignore LastCleaned
-#   .\Remove-OldVersions.ps1 -WhatIf               # dry run (does not write LastCleaned)
+#   .\Remove-OldVersions.ps1 -WhatIf                # dry run (does not write LastCleaned)
 #   .\Remove-OldVersions.ps1 -SiteFilter "FileMagicUK"
 #   .\Remove-OldVersions.ps1 -LibraryFilter "DESIGN_REVIEW"
-#   .\Remove-OldVersions.ps1 -PauseBatchSize 1000 -PauseMinutes 15
-#   .\Remove-OldVersions.ps1 -ThrottleMs 200
+#   .\Remove-OldVersions.ps1 -PauseBatchSize 5000 -PauseMinutes 10
+#   .\Remove-OldVersions.ps1 -ThrottleMs 50
 #
 # Requirements:
 #   - PowerShell 5.1+
@@ -39,12 +39,12 @@ param(
     [string]$LibraryFilter = "",   # exact match on LibraryName  (e.g. "DESIGN_REVIEW")
 
     # Throttle / safety controls
-    [int]$ThrottleMs   = 100,   # ms to wait between each version delete call
+    [int]$ThrottleMs   = 50,    # ms to wait between each version delete call (was 100)
     [int]$MaxRetries   = 5,     # how many times to retry a 429 before giving up
 
     # Batch pause - pause for PauseMinutes after every PauseBatchSize files that needed cleanup
-    [int]$PauseBatchSize = 1000,  # 0 = never pause
-    [int]$PauseMinutes   = 15
+    [int]$PauseBatchSize = 5000,  # pause after this many dirty files (was 1000)
+    [int]$PauseMinutes   = 10     # how long to pause (was 15)
 )
 
 # Always keep only the live file — no previous versions ever retained
