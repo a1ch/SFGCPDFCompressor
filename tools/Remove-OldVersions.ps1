@@ -5,12 +5,12 @@
 #
 # Usage:
 #   .\Remove-OldVersions.ps1
-#   .\Remove-OldVersions.ps1 -WhatIf                          # dry run all enabled targets
-#   .\Remove-OldVersions.ps1 -SiteFilter "FileMagicUK"        # only sites whose URL contains "FileMagicUK"
-#   .\Remove-OldVersions.ps1 -LibraryFilter "DESIGN_REVIEW"   # only libraries with this exact name
-#   .\Remove-OldVersions.ps1 -SiteFilter "itsp" -LibraryFilter "Documents"
-#   .\Remove-OldVersions.ps1 -MaxFiles 500                    # stop after processing 500 files total
-#   .\Remove-OldVersions.ps1 -ThrottleMs 200                  # wait 200ms between each version delete
+#   .\Remove-OldVersions.ps1 -WhatIf                                   # dry run all enabled targets
+#   .\Remove-OldVersions.ps1 -SiteFilter "FileMagicUK"                 # only sites whose URL contains "FileMagicUK"
+#   .\Remove-OldVersions.ps1 -LibraryFilter "DESIGN_REVIEW"            # only libraries with this exact name
+#   .\Remove-OldVersions.ps1 -SiteFilter "itsp" -LibraryFilter "Docs"
+#   .\Remove-OldVersions.ps1 -PauseBatchSize 1000 -PauseMinutes 15     # pause 15 min every 1000 files
+#   .\Remove-OldVersions.ps1 -ThrottleMs 200                           # wait 200ms between each version delete
 #
 # Requirements:
 #   - PowerShell 5.1+
@@ -25,9 +25,12 @@ param(
     [string]$LibraryFilter  = "",   # exact match on LibraryName  (e.g. "DESIGN_REVIEW")
 
     # Throttle / safety controls
-    [int]$ThrottleMs  = 100,     # ms to wait between each version delete call
-    [int]$MaxFiles    = 0,       # 0 = unlimited; set to cap total files processed this run
-    [int]$MaxRetries  = 5        # how many times to retry a 429 before giving up
+    [int]$ThrottleMs      = 100,   # ms to wait between each version delete call
+    [int]$MaxRetries      = 5,     # how many times to retry a 429 before giving up
+
+    # Batch pause - pause for PauseMinutes after every PauseBatchSize files
+    [int]$PauseBatchSize  = 1000,  # pause after this many files (0 = never pause)
+    [int]$PauseMinutes    = 15     # how long to pause (minutes)
 )
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
@@ -76,11 +79,8 @@ function Invoke-GraphRequest {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
             if ($statusCode -eq 429 -and $attempt -lt $Retries) {
-                # Try to read Retry-After header; default to exponential backoff
                 $retryAfter = 10
-                try {
-                    $retryAfter = [int]$_.Exception.Response.Headers["Retry-After"]
-                } catch {}
+                try { $retryAfter = [int]$_.Exception.Response.Headers["Retry-After"] } catch {}
                 if ($retryAfter -lt 1) { $retryAfter = [math]::Pow(2, $attempt + 1) }
                 Write-Warning "  429 Too Many Requests - waiting $retryAfter s before retry ($($attempt+1)/$Retries)..."
                 Start-Sleep -Seconds $retryAfter
@@ -156,13 +156,37 @@ function Remove-OldVersions {
     return $deleted
 }
 
+function Invoke-BatchPause {
+    param([int]$Minutes, [int]$FilesProcessed, [ref]$Token)
+    $pauseSecs = $Minutes * 60
+    Write-Host ""
+    Write-Host "======================================" -ForegroundColor Cyan
+    Write-Host "  Batch pause after $FilesProcessed files" -ForegroundColor Cyan
+    Write-Host "  Cooling down for $Minutes minutes..." -ForegroundColor Cyan
+
+    $resume = (Get-Date).AddSeconds($pauseSecs)
+    while ((Get-Date) -lt $resume) {
+        $remaining = [math]::Ceiling(($resume - (Get-Date)).TotalSeconds)
+        Write-Host "  Resuming in $remaining s...   " -NoNewline
+        "`r" | Write-Host -NoNewline
+        Start-Sleep -Seconds 15
+    }
+
+    Write-Host "  Pause complete - refreshing token and resuming." -ForegroundColor Cyan
+    Write-Host "======================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Refresh token after the pause - it may have expired during a long cooldown
+    $Token.Value = Get-AppToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+}
+
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
 if ($WhatIf) { Write-Host "*** DRY RUN MODE - no versions will be deleted ***`n" -ForegroundColor Yellow }
-if ($SiteFilter)    { Write-Host "Site filter:    '$SiteFilter'" -ForegroundColor Cyan }
-if ($LibraryFilter) { Write-Host "Library filter: '$LibraryFilter'" -ForegroundColor Cyan }
-if ($MaxFiles -gt 0){ Write-Host "Max files:      $MaxFiles" -ForegroundColor Cyan }
-Write-Host "Throttle:       $ThrottleMs ms between deletes" -ForegroundColor Cyan
+if ($SiteFilter)        { Write-Host "Site filter:      '$SiteFilter'"                           -ForegroundColor Cyan }
+if ($LibraryFilter)     { Write-Host "Library filter:   '$LibraryFilter'"                        -ForegroundColor Cyan }
+if ($PauseBatchSize -gt 0) { Write-Host "Batch pause:      every $PauseBatchSize files for $PauseMinutes min" -ForegroundColor Cyan }
+Write-Host "Throttle:         $ThrottleMs ms between deletes"                                    -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "Authenticating..."
@@ -171,9 +195,8 @@ Write-Host "Authenticated successfully`n"
 
 Write-Host "Reading compression targets from '$ConfigListName'..."
 $configSiteId = Get-SiteId -SiteUrl $ConfigSiteUrl -Token $token
-$configListId = ""
-$listResp = Invoke-GraphRequest -Uri "https://graph.microsoft.com/v1.0/sites/$configSiteId/lists?`$filter=displayName eq '$ConfigListName'" -Headers (Get-GraphHeaders $token)
-$configList = $listResp.value | Where-Object { $_.displayName -eq $ConfigListName } | Select-Object -First 1
+$listResp     = Invoke-GraphRequest -Uri "https://graph.microsoft.com/v1.0/sites/$configSiteId/lists?`$filter=displayName eq '$ConfigListName'" -Headers (Get-GraphHeaders $token)
+$configList   = $listResp.value | Where-Object { $_.displayName -eq $ConfigListName } | Select-Object -First 1
 if (-not $configList) { throw "List '$ConfigListName' not found" }
 $configListId = $configList.id
 
@@ -188,20 +211,18 @@ do {
 # Apply enabled + optional site/library filters
 $targets = $items | Where-Object {
     if ($_.fields.Enabled -ne $true) { return $false }
-    if ($SiteFilter    -and $_.fields.SiteUrl     -notlike "*$SiteFilter*")    { return $false }
-    if ($LibraryFilter -and $_.fields.LibraryName -ne $LibraryFilter)          { return $false }
+    if ($SiteFilter    -and $_.fields.SiteUrl     -notlike "*$SiteFilter*") { return $false }
+    if ($LibraryFilter -and $_.fields.LibraryName -ne $LibraryFilter)       { return $false }
     return $true
 }
 
 Write-Host "Found $($targets.Count) matching target(s) (of $($items.Count) total)`n"
 
-$totalDeleted = 0
-$totalFiles   = 0
-$hitMaxFiles  = $false
+$totalDeleted  = 0
+$totalFiles    = 0
+$filesSincePause = 0
 
 foreach ($target in $targets) {
-    if ($hitMaxFiles) { break }
-
     $siteUrl     = $target.fields.SiteUrl
     $libraryName = $target.fields.LibraryName
     if ($target.fields.Title) { $label = $target.fields.Title } else { $label = "$siteUrl / $libraryName" }
@@ -222,15 +243,16 @@ foreach ($target in $targets) {
         Write-Host "  Files:   $($files.Count)"
 
         foreach ($file in $files) {
-            if ($MaxFiles -gt 0 -and $totalFiles -ge $MaxFiles) {
-                Write-Host "`n  MaxFiles ($MaxFiles) reached - stopping." -ForegroundColor Yellow
-                $hitMaxFiles = $true
-                break
+            # Pause check - after PauseBatchSize files, cool down then continue
+            if ($PauseBatchSize -gt 0 -and $filesSincePause -gt 0 -and ($filesSincePause % $PauseBatchSize) -eq 0) {
+                Invoke-BatchPause -Minutes $PauseMinutes -FilesProcessed $totalFiles -Token ([ref]$token)
             }
-            $deleted      = Remove-OldVersions -DriveId $driveId -ItemId $file.id -ItemName $file.name `
-                                               -Token $token -Keep $KeepVersions -DryRun $WhatIf.IsPresent
-            $totalDeleted += $deleted
+
+            $deleted         = Remove-OldVersions -DriveId $driveId -ItemId $file.id -ItemName $file.name `
+                                                  -Token $token -Keep $KeepVersions -DryRun $WhatIf.IsPresent
+            $totalDeleted   += $deleted
             $totalFiles++
+            $filesSincePause++
         }
     } catch {
         Write-Warning "  Failed to process '$label': $_"
@@ -239,7 +261,6 @@ foreach ($target in $targets) {
 
 Write-Host ""
 Write-Host "=============================================="
-if ($hitMaxFiles) { Write-Host "Stopped early at MaxFiles limit ($MaxFiles)." -ForegroundColor Yellow }
 Write-Host "Complete. $totalFiles file(s) checked, $totalDeleted version(s) deleted."
 if ($WhatIf) { Write-Host "(Dry run - nothing was actually deleted)" -ForegroundColor Yellow }
 Write-Host "=============================================="
