@@ -1,47 +1,48 @@
 # Remove-OldVersions.ps1
-# One-off tool to delete old SharePoint file versions from compressed libraries.
+# Deletes all previous versions from SharePoint files in compressed libraries,
+# keeping only the current live file. No versions are ever retained.
+#
 # Authenticates using app registration client credentials (same as the function app).
 # Token is refreshed before each library to handle long runs.
 #
 # How API calls are minimised:
-#   - Get-AllDriveItems fetches each page of files WITH versions expanded ($top=2 per file).
-#     This gives us enough to know if a file has more than KeepVersions versions in a single
-#     paged request — no extra per-file API call needed just to check.
-#   - Files that already have <= KeepVersions are skipped entirely (no versions endpoint hit,
-#     no delete calls). On a library that's already mostly clean this saves the vast majority
-#     of API calls.
-#   - Only files that actually need cleanup proceed to the full versions list + delete loop.
+#   - Get-AllDriveItems fetches each page of files WITH versions expanded ($top=2).
+#     This tells us immediately whether a file has any old versions at all — no
+#     separate per-file API call needed just to check.
+#   - Files that are already on version 1 only are skipped with zero extra API calls.
+#   - Only files that actually have old versions proceed to the full delete loop.
 #
 # Usage:
 #   .\Remove-OldVersions.ps1
-#   .\Remove-OldVersions.ps1 -WhatIf                                   # dry run all enabled targets
-#   .\Remove-OldVersions.ps1 -SiteFilter "FileMagicUK"                 # only sites whose URL contains "FileMagicUK"
-#   .\Remove-OldVersions.ps1 -LibraryFilter "DESIGN_REVIEW"            # only libraries with this exact name
-#   .\Remove-OldVersions.ps1 -SiteFilter "itsp" -LibraryFilter "Docs"
-#   .\Remove-OldVersions.ps1 -PauseBatchSize 1000 -PauseMinutes 15     # pause 15 min every 1000 files NEEDING cleanup
-#   .\Remove-OldVersions.ps1 -ThrottleMs 200                           # wait 200ms between each version delete
+#   .\Remove-OldVersions.ps1 -WhatIf                                    # dry run
+#   .\Remove-OldVersions.ps1 -SiteFilter "FileMagicUK"                  # one site
+#   .\Remove-OldVersions.ps1 -LibraryFilter "DESIGN_REVIEW"             # one library
+#   .\Remove-OldVersions.ps1 -PauseBatchSize 1000 -PauseMinutes 15      # pace the run
+#   .\Remove-OldVersions.ps1 -ThrottleMs 200                            # slower deletes
 #
 # Requirements:
 #   - PowerShell 5.1+
-#   - TENANT_ID, CLIENT_ID, CLIENT_SECRET env vars (or it will prompt)
+#   - TENANT_ID, CLIENT_ID, CLIENT_SECRET env vars (or script will prompt)
 
 param(
-    [int]$KeepVersions  = 1,
     [switch]$WhatIf,
 
     # Targeting - leave blank to process all enabled targets
-    [string]$SiteFilter     = "",   # substring match on SiteUrl  (e.g. "FileMagicUK")
-    [string]$LibraryFilter  = "",   # exact match on LibraryName  (e.g. "DESIGN_REVIEW")
+    [string]$SiteFilter    = "",   # substring match on SiteUrl  (e.g. "FileMagicUK")
+    [string]$LibraryFilter = "",   # exact match on LibraryName  (e.g. "DESIGN_REVIEW")
 
     # Throttle / safety controls
-    [int]$ThrottleMs      = 100,   # ms to wait between each version delete call
-    [int]$MaxRetries      = 5,     # how many times to retry a 429 before giving up
+    [int]$ThrottleMs   = 100,   # ms to wait between each version delete call
+    [int]$MaxRetries   = 5,     # how many times to retry a 429 before giving up
 
-    # Batch pause - pause for PauseMinutes after every PauseBatchSize files NEEDING cleanup
-    # (files that are already clean don't count toward this — they're skipped for free)
-    [int]$PauseBatchSize  = 1000,  # 0 = never pause
-    [int]$PauseMinutes    = 15
+    # Batch pause - pause for PauseMinutes after every PauseBatchSize files that needed cleanup
+    # Files already on version 1 are skipped for free and don't count toward this
+    [int]$PauseBatchSize = 1000,  # 0 = never pause
+    [int]$PauseMinutes   = 15
 )
+
+# Always keep only the live file — no previous versions ever retained
+$KEEP = 1
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 if ($env:TENANT_ID)        { $TenantId       = $env:TENANT_ID        } else { $TenantId       = Read-Host "Tenant ID" }
@@ -118,20 +119,17 @@ function Get-DriveId {
 }
 
 function Get-AllDriveItems {
-    # Fetches all files in the drive.
-    # Expands versions with $top=KeepVersions+1 so we can tell immediately whether
-    # a file needs cleanup without a separate API call per file.
-    # A file comes back with versions.Count > KeepVersions only if it has old versions to delete.
-    param([string]$DriveId, [string]$Token, [int]$KeepVersions)
+    # Fetches all files, expanding versions with $top=2.
+    # If a file comes back with 2 versions it has at least one old version to delete.
+    # If it comes back with 1 version it is already clean — skip it for free.
+    param([string]$DriveId, [string]$Token)
 
     $headers  = Get-GraphHeaders $Token
     $allItems = @()
-    $expandTop = $KeepVersions + 1   # fetch just one more than we want to keep — enough to know cleanup is needed
 
-    # $expand=versions with $top scoped to the expand so we don't pull the full version list here
     $nextUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/root/search(q='')" +
                "?`$select=id,name,file,size" +
-               "&`$expand=versions(`$select=id;`$top=$expandTop)" +
+               "&`$expand=versions(`$select=id;`$top=2)" +
                "&`$top=500"
 
     do {
@@ -143,25 +141,23 @@ function Get-AllDriveItems {
     return $allItems
 }
 
-function Remove-OldVersions {
-    param([string]$DriveId, [string]$ItemId, [string]$ItemName, [string]$Token, [int]$Keep, [bool]$DryRun)
+function Remove-AllOldVersions {
+    # Deletes every version except the current one (index 0, newest first).
+    param([string]$DriveId, [string]$ItemId, [string]$ItemName, [string]$Token, [bool]$DryRun)
 
-    $headers = Get-GraphHeaders $Token
-
-    # Fetch full version list now — we only reach here for files that need cleanup
+    $headers  = Get-GraphHeaders $Token
     $resp     = Invoke-GraphRequest -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$ItemId/versions" -Headers $headers
-    $versions = $resp.value  # newest first
+    $versions = $resp.value  # newest first — index 0 is the live file
 
-    if ($versions.Count -le $Keep) {
-        # Shouldn't normally reach here given the pre-filter, but guard anyway
-        Write-Host "  SKIP  $ItemName ($($versions.Count) version(s))"
+    if ($versions.Count -le $KEEP) {
+        Write-Host "  SKIP  $ItemName (already on version 1 only)"
         return 0
     }
 
-    $toDelete = $versions | Select-Object -Skip $Keep
+    $toDelete = $versions | Select-Object -Skip $KEEP   # everything after the live version
 
     if ($DryRun) {
-        Write-Host "  DRYRUN  $ItemName - would delete $($toDelete.Count) version(s) (keeping $Keep)"
+        Write-Host "  DRYRUN  $ItemName - would delete $($toDelete.Count) old version(s)"
         return $toDelete.Count
     }
 
@@ -178,7 +174,7 @@ function Remove-OldVersions {
         }
     }
 
-    Write-Host "  DONE  $ItemName - deleted $deleted version(s)"
+    Write-Host "  DONE  $ItemName - deleted $deleted old version(s)"
     return $deleted
 }
 
@@ -187,7 +183,7 @@ function Invoke-BatchPause {
     $pauseSecs = $Minutes * 60
     Write-Host ""
     Write-Host "======================================" -ForegroundColor Cyan
-    Write-Host "  Batch pause after $FilesProcessed files needing cleanup" -ForegroundColor Cyan
+    Write-Host "  Batch pause after $FilesProcessed files cleaned" -ForegroundColor Cyan
     Write-Host "  Cooling down for $Minutes minutes..." -ForegroundColor Cyan
 
     $resume = (Get-Date).AddSeconds($pauseSecs)
@@ -208,11 +204,11 @@ function Invoke-BatchPause {
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
 if ($WhatIf) { Write-Host "*** DRY RUN MODE - no versions will be deleted ***`n" -ForegroundColor Yellow }
-if ($SiteFilter)           { Write-Host "Site filter:      '$SiteFilter'"                                        -ForegroundColor Cyan }
-if ($LibraryFilter)        { Write-Host "Library filter:   '$LibraryFilter'"                                     -ForegroundColor Cyan }
-if ($PauseBatchSize -gt 0) { Write-Host "Batch pause:      every $PauseBatchSize dirty files for $PauseMinutes min" -ForegroundColor Cyan }
-Write-Host "Throttle:         $ThrottleMs ms between deletes"                                                    -ForegroundColor Cyan
-Write-Host "Version pre-scan: enabled (skips clean files without extra API calls)"                               -ForegroundColor Cyan
+if ($SiteFilter)           { Write-Host "Site filter:    '$SiteFilter'"                                          -ForegroundColor Cyan }
+if ($LibraryFilter)        { Write-Host "Library filter: '$LibraryFilter'"                                       -ForegroundColor Cyan }
+if ($PauseBatchSize -gt 0) { Write-Host "Batch pause:    every $PauseBatchSize files cleaned, $PauseMinutes min" -ForegroundColor Cyan }
+Write-Host "Throttle:       $ThrottleMs ms between deletes"                                                      -ForegroundColor Cyan
+Write-Host "Keeping:        live file only (all previous versions deleted)"                                      -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "Authenticating..."
@@ -234,7 +230,6 @@ do {
     $nextUri = $resp.'@odata.nextLink'
 } while ($nextUri)
 
-# Apply enabled + optional site/library filters
 $targets = $items | Where-Object {
     if ($_.fields.Enabled -ne $true) { return $false }
     if ($SiteFilter    -and $_.fields.SiteUrl     -notlike "*$SiteFilter*") { return $false }
@@ -244,10 +239,10 @@ $targets = $items | Where-Object {
 
 Write-Host "Found $($targets.Count) matching target(s) (of $($items.Count) total)`n"
 
-$totalDeleted    = 0
-$totalFiles      = 0   # all files scanned
-$totalDirty      = 0   # files that actually needed cleanup
-$dirtyForPause   = 0   # dirty file counter for batch pause
+$totalDeleted  = 0
+$totalFiles    = 0
+$totalDirty    = 0
+$dirtyForPause = 0
 
 foreach ($target in $targets) {
     $siteUrl     = $target.fields.SiteUrl
@@ -259,32 +254,29 @@ foreach ($target in $targets) {
     Write-Host "  Site:    $siteUrl"
     Write-Host "  Library: $libraryName"
 
-    # Refresh token before each library (tokens expire after 1 hour)
     $token = Get-AppToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
 
     try {
         $siteId  = Get-SiteId -SiteUrl $siteUrl -Token $token
         $driveId = Get-DriveId -SiteId $siteId -LibraryName $libraryName -Token $token
 
-        Write-Host "  Scanning files (with version pre-check)..."
-        $files = Get-AllDriveItems -DriveId $driveId -Token $token -KeepVersions $KeepVersions
+        Write-Host "  Scanning files..."
+        $files = Get-AllDriveItems -DriveId $driveId -Token $token
 
-        # Split into dirty (needs cleanup) vs clean (already fine) right from the expanded data
-        $dirtyFiles = $files | Where-Object { $_.versions -and $_.versions.Count -gt $KeepVersions }
-        $cleanFiles = $files | Where-Object { -not $_.versions -or $_.versions.Count -le $KeepVersions }
+        $dirtyFiles = $files | Where-Object { $_.versions -and $_.versions.Count -gt $KEEP }
+        $cleanCount = $files.Count - $dirtyFiles.Count
 
-        Write-Host "  Files:   $($files.Count) total  |  $($dirtyFiles.Count) need cleanup  |  $($cleanFiles.Count) already clean (skipped)"
+        Write-Host "  Files: $($files.Count) total  |  $($dirtyFiles.Count) have old versions  |  $cleanCount already clean"
 
         $totalFiles += $files.Count
 
         foreach ($file in $dirtyFiles) {
-            # Pause check - only dirty files count toward the batch pause threshold
             if ($PauseBatchSize -gt 0 -and $dirtyForPause -gt 0 -and ($dirtyForPause % $PauseBatchSize) -eq 0) {
                 Invoke-BatchPause -Minutes $PauseMinutes -FilesProcessed $totalDirty -Token ([ref]$token)
             }
 
-            $deleted       = Remove-OldVersions -DriveId $driveId -ItemId $file.id -ItemName $file.name `
-                                                -Token $token -Keep $KeepVersions -DryRun $WhatIf.IsPresent
+            $deleted       = Remove-AllOldVersions -DriveId $driveId -ItemId $file.id -ItemName $file.name `
+                                                   -Token $token -DryRun $WhatIf.IsPresent
             $totalDeleted += $deleted
             $totalDirty++
             $dirtyForPause++
@@ -297,8 +289,8 @@ foreach ($target in $targets) {
 Write-Host ""
 Write-Host "=============================================="
 Write-Host "Complete."
-Write-Host "  Files scanned:       $totalFiles"
-Write-Host "  Files needing work:  $totalDirty"
-Write-Host "  Versions deleted:    $totalDeleted"
+Write-Host "  Files scanned:        $totalFiles"
+Write-Host "  Files with old vers:  $totalDirty"
+Write-Host "  Versions deleted:     $totalDeleted"
 if ($WhatIf) { Write-Host "(Dry run - nothing was actually deleted)" -ForegroundColor Yellow }
 Write-Host "=============================================="
