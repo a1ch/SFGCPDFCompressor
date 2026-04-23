@@ -5,18 +5,25 @@
 # Authenticates using app registration client credentials (same as the function app).
 # Token is refreshed before each library to handle long runs.
 #
+# After each library completes, writes the current timestamp to the LastCleaned
+# column in the SFGCFMCompressor config list. On subsequent runs, libraries where
+# LastCleaned is within SkipIfCleanedDays are skipped entirely — no file scanning,
+# no API calls.
+#
 # How API calls are minimised:
-#   - Get-AllDriveItems fetches each page of files WITH versions expanded ($top=2).
-#     This tells us immediately whether a file has any old versions at all — no
-#     separate per-file API call needed just to check.
-#   - Files that are already on version 1 only are skipped with zero extra API calls.
+#   - Libraries cleaned recently are skipped with a single config list read.
+#   - Get-AllDriveItems fetches files WITH versions expanded ($top=2) so we know
+#     immediately whether a file needs cleanup — no separate per-file API call.
+#   - Files already on version 1 only are skipped with zero extra API calls.
 #   - Only files that actually have old versions proceed to the full delete loop.
 #
 # Usage:
 #   .\Remove-OldVersions.ps1
-#   .\Remove-OldVersions.ps1 -WhatIf                                    # dry run
+#   .\Remove-OldVersions.ps1 -WhatIf                                    # dry run (does not write LastCleaned)
 #   .\Remove-OldVersions.ps1 -SiteFilter "FileMagicUK"                  # one site
 #   .\Remove-OldVersions.ps1 -LibraryFilter "DESIGN_REVIEW"             # one library
+#   .\Remove-OldVersions.ps1 -SkipIfCleanedDays 7                       # skip libraries cleaned in last 7 days (default)
+#   .\Remove-OldVersions.ps1 -SkipIfCleanedDays 0                       # disable skip — always scan everything
 #   .\Remove-OldVersions.ps1 -PauseBatchSize 1000 -PauseMinutes 15      # pace the run
 #   .\Remove-OldVersions.ps1 -ThrottleMs 200                            # slower deletes
 #
@@ -31,12 +38,14 @@ param(
     [string]$SiteFilter    = "",   # substring match on SiteUrl  (e.g. "FileMagicUK")
     [string]$LibraryFilter = "",   # exact match on LibraryName  (e.g. "DESIGN_REVIEW")
 
+    # Skip libraries already cleaned recently
+    [int]$SkipIfCleanedDays = 7,  # 0 = never skip, always scan
+
     # Throttle / safety controls
     [int]$ThrottleMs   = 100,   # ms to wait between each version delete call
     [int]$MaxRetries   = 5,     # how many times to retry a 429 before giving up
 
     # Batch pause - pause for PauseMinutes after every PauseBatchSize files that needed cleanup
-    # Files already on version 1 are skipped for free and don't count toward this
     [int]$PauseBatchSize = 1000,  # 0 = never pause
     [int]$PauseMinutes   = 15
 )
@@ -72,18 +81,20 @@ function Get-GraphHeaders {
     return @{ Authorization = "Bearer $Token"; "Content-Type" = "application/json" }
 }
 
-# Invoke-RestMethod wrapper that retries on 429 with Retry-After backoff
 function Invoke-GraphRequest {
     param(
         [string]$Uri,
         [string]$Method = "GET",
         [hashtable]$Headers,
+        [string]$Body = $null,
         [int]$Retries = $MaxRetries
     )
     $attempt = 0
     while ($true) {
         try {
-            return Invoke-RestMethod -Uri $Uri -Method $Method -Headers $Headers
+            $params = @{ Uri = $Uri; Method = $Method; Headers = $Headers }
+            if ($Body) { $params.Body = $Body }
+            return Invoke-RestMethod @params
         } catch {
             $statusCode = $null
             if ($_.Exception.Response) {
@@ -119,42 +130,47 @@ function Get-DriveId {
 }
 
 function Get-AllDriveItems {
-    # Fetches all files, expanding versions with $top=2.
-    # If a file comes back with 2 versions it has at least one old version to delete.
-    # If it comes back with 1 version it is already clean — skip it for free.
     param([string]$DriveId, [string]$Token)
-
     $headers  = Get-GraphHeaders $Token
     $allItems = @()
-
-    $nextUri = "https://graph.microsoft.com/v1.0/drives/$DriveId/root/search(q='')" +
-               "?`$select=id,name,file,size" +
-               "&`$expand=versions(`$select=id;`$top=2)" +
-               "&`$top=500"
-
+    $nextUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/root/search(q='')" +
+                "?`$select=id,name,file,size" +
+                "&`$expand=versions(`$select=id;`$top=2)" +
+                "&`$top=500"
     do {
         $resp     = Invoke-GraphRequest -Uri $nextUri -Headers $headers
         $allItems += $resp.value | Where-Object { $_.file }
         $nextUri  = $resp.'@odata.nextLink'
     } while ($nextUri)
-
     return $allItems
 }
 
-function Remove-AllOldVersions {
-    # Deletes every version except the current one (index 0, newest first).
-    param([string]$DriveId, [string]$ItemId, [string]$ItemName, [string]$Token, [bool]$DryRun)
+function Set-LastCleaned {
+    # Writes the current UTC timestamp to the LastCleaned column on the config list row
+    param([string]$ConfigSiteId, [string]$ConfigListId, [string]$ListItemId, [string]$Token)
+    $now  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $body = @{ LastCleaned = $now } | ConvertTo-Json
+    $uri  = "https://graph.microsoft.com/v1.0/sites/$ConfigSiteId/lists/$ConfigListId/items/$ListItemId/fields"
+    try {
+        Invoke-GraphRequest -Uri $uri -Method PATCH -Headers (Get-GraphHeaders $Token) -Body $body | Out-Null
+        Write-Host "  LastCleaned updated: $now" -ForegroundColor DarkGray
+    } catch {
+        Write-Warning "  Could not update LastCleaned: $_"
+    }
+}
 
+function Remove-AllOldVersions {
+    param([string]$DriveId, [string]$ItemId, [string]$ItemName, [string]$Token, [bool]$DryRun)
     $headers  = Get-GraphHeaders $Token
     $resp     = Invoke-GraphRequest -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$ItemId/versions" -Headers $headers
-    $versions = $resp.value  # newest first — index 0 is the live file
+    $versions = $resp.value  # newest first
 
     if ($versions.Count -le $KEEP) {
         Write-Host "  SKIP  $ItemName (already on version 1 only)"
         return 0
     }
 
-    $toDelete = $versions | Select-Object -Skip $KEEP   # everything after the live version
+    $toDelete = $versions | Select-Object -Skip $KEEP
 
     if ($DryRun) {
         Write-Host "  DRYRUN  $ItemName - would delete $($toDelete.Count) old version(s)"
@@ -185,7 +201,6 @@ function Invoke-BatchPause {
     Write-Host "======================================" -ForegroundColor Cyan
     Write-Host "  Batch pause after $FilesProcessed files cleaned" -ForegroundColor Cyan
     Write-Host "  Cooling down for $Minutes minutes..." -ForegroundColor Cyan
-
     $resume = (Get-Date).AddSeconds($pauseSecs)
     while ((Get-Date) -lt $resume) {
         $remaining = [math]::Ceiling(($resume - (Get-Date)).TotalSeconds)
@@ -193,22 +208,21 @@ function Invoke-BatchPause {
         "`r" | Write-Host -NoNewline
         Start-Sleep -Seconds 15
     }
-
     Write-Host "  Pause complete - refreshing token and resuming." -ForegroundColor Cyan
     Write-Host "======================================" -ForegroundColor Cyan
     Write-Host ""
-
     $Token.Value = Get-AppToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
 }
 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
-if ($WhatIf) { Write-Host "*** DRY RUN MODE - no versions will be deleted ***`n" -ForegroundColor Yellow }
-if ($SiteFilter)           { Write-Host "Site filter:    '$SiteFilter'"                                          -ForegroundColor Cyan }
-if ($LibraryFilter)        { Write-Host "Library filter: '$LibraryFilter'"                                       -ForegroundColor Cyan }
-if ($PauseBatchSize -gt 0) { Write-Host "Batch pause:    every $PauseBatchSize files cleaned, $PauseMinutes min" -ForegroundColor Cyan }
-Write-Host "Throttle:       $ThrottleMs ms between deletes"                                                      -ForegroundColor Cyan
-Write-Host "Keeping:        live file only (all previous versions deleted)"                                      -ForegroundColor Cyan
+if ($WhatIf) { Write-Host "*** DRY RUN MODE - no versions will be deleted, LastCleaned will not be updated ***`n" -ForegroundColor Yellow }
+if ($SiteFilter)            { Write-Host "Site filter:      '$SiteFilter'"                                           -ForegroundColor Cyan }
+if ($LibraryFilter)         { Write-Host "Library filter:   '$LibraryFilter'"                                        -ForegroundColor Cyan }
+if ($SkipIfCleanedDays -gt 0) { Write-Host "Skip if cleaned:  within last $SkipIfCleanedDays day(s)"               -ForegroundColor Cyan }
+if ($PauseBatchSize -gt 0)  { Write-Host "Batch pause:      every $PauseBatchSize files cleaned, $PauseMinutes min" -ForegroundColor Cyan }
+Write-Host "Throttle:         $ThrottleMs ms between deletes"                                                        -ForegroundColor Cyan
+Write-Host "Keeping:          live file only (all previous versions deleted)"                                        -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "Authenticating..."
@@ -242,17 +256,31 @@ Write-Host "Found $($targets.Count) matching target(s) (of $($items.Count) total
 $totalDeleted  = 0
 $totalFiles    = 0
 $totalDirty    = 0
+$totalSkipped  = 0
 $dirtyForPause = 0
 
 foreach ($target in $targets) {
     $siteUrl     = $target.fields.SiteUrl
     $libraryName = $target.fields.LibraryName
+    $listItemId  = $target.id
     if ($target.fields.Title) { $label = $target.fields.Title } else { $label = "$siteUrl / $libraryName" }
 
     Write-Host "----------------------------------------"
     Write-Host "Library: $label"
     Write-Host "  Site:    $siteUrl"
     Write-Host "  Library: $libraryName"
+
+    # Check LastCleaned — skip if cleaned recently enough
+    if ($SkipIfCleanedDays -gt 0 -and $target.fields.LastCleaned) {
+        $lastCleaned = [datetime]::Parse($target.fields.LastCleaned)
+        $daysSince   = ((Get-Date).ToUniversalTime() - $lastCleaned.ToUniversalTime()).TotalDays
+        if ($daysSince -lt $SkipIfCleanedDays) {
+            $cleanedAgo = [math]::Round($daysSince, 1)
+            Write-Host "  SKIPPED - cleaned $cleanedAgo day(s) ago (threshold: $SkipIfCleanedDays days)" -ForegroundColor DarkGray
+            $totalSkipped++
+            continue
+        }
+    }
 
     $token = Get-AppToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
 
@@ -281,6 +309,13 @@ foreach ($target in $targets) {
             $totalDirty++
             $dirtyForPause++
         }
+
+        # Write LastCleaned back to the config list row (skip in dry run)
+        if (-not $WhatIf) {
+            Set-LastCleaned -ConfigSiteId $configSiteId -ConfigListId $configListId `
+                            -ListItemId $listItemId -Token $token
+        }
+
     } catch {
         Write-Warning "  Failed to process '$label': $_"
     }
@@ -289,8 +324,9 @@ foreach ($target in $targets) {
 Write-Host ""
 Write-Host "=============================================="
 Write-Host "Complete."
+Write-Host "  Libraries skipped:    $totalSkipped (cleaned within $SkipIfCleanedDays day(s))"
 Write-Host "  Files scanned:        $totalFiles"
 Write-Host "  Files with old vers:  $totalDirty"
 Write-Host "  Versions deleted:     $totalDeleted"
-if ($WhatIf) { Write-Host "(Dry run - nothing was actually deleted)" -ForegroundColor Yellow }
+if ($WhatIf) { Write-Host "(Dry run - nothing was deleted, LastCleaned not updated)" -ForegroundColor Yellow }
 Write-Host "=============================================="
