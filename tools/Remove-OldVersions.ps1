@@ -10,13 +10,6 @@
 # that has a LastCleaned value is skipped entirely — no file scanning, no API calls.
 # Use -Force to override and rescan everything regardless of LastCleaned.
 #
-# How API calls are minimised:
-#   - Libraries with LastCleaned set are skipped with a single config list read.
-#   - Get-AllDriveItems fetches files WITH versions expanded ($top=2) so we know
-#     immediately whether a file needs cleanup — no separate per-file API call.
-#   - Files already on version 1 only are skipped with zero extra API calls.
-#   - Only files that actually have old versions proceed to the full delete loop.
-#
 # Usage:
 #   .\Remove-OldVersions.ps1                        # skip libraries already cleaned
 #   .\Remove-OldVersions.ps1 -Force                 # rescan everything, ignore LastCleaned
@@ -32,22 +25,17 @@
 
 param(
     [switch]$WhatIf,
-    [switch]$Force,            # ignore LastCleaned and scan all libraries
+    [switch]$Force,
 
-    # Targeting - leave blank to process all enabled targets
-    [string]$SiteFilter    = "",   # substring match on SiteUrl  (e.g. "FileMagicUK")
-    [string]$LibraryFilter = "",   # exact match on LibraryName  (e.g. "DESIGN_REVIEW")
+    [string]$SiteFilter    = "",
+    [string]$LibraryFilter = "",
 
-    # Throttle / safety controls
-    [int]$ThrottleMs   = 50,    # ms to wait between each version delete call (was 100)
-    [int]$MaxRetries   = 5,     # how many times to retry a 429 before giving up
-
-    # Batch pause - pause for PauseMinutes after every PauseBatchSize files that needed cleanup
-    [int]$PauseBatchSize = 5000,  # pause after this many dirty files (was 1000)
-    [int]$PauseMinutes   = 10     # how long to pause (was 15)
+    [int]$ThrottleMs     = 50,
+    [int]$MaxRetries     = 5,
+    [int]$PauseBatchSize = 5000,
+    [int]$PauseMinutes   = 10
 )
 
-# Always keep only the live file — no previous versions ever retained
 $KEEP = 1
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
@@ -127,13 +115,12 @@ function Get-DriveId {
 }
 
 function Get-AllDriveItems {
+    # Simple file listing — no expand, works on all library types
     param([string]$DriveId, [string]$Token)
     $headers  = Get-GraphHeaders $Token
     $allItems = @()
     $nextUri  = "https://graph.microsoft.com/v1.0/drives/$DriveId/root/search(q='')" +
-                "?`$select=id,name,file,size" +
-                "&`$expand=versions(`$select=id;`$top=2)" +
-                "&`$top=500"
+                "?`$select=id,name,file,size&`$top=500"
     do {
         $resp     = Invoke-GraphRequest -Uri $nextUri -Headers $headers
         $allItems += $resp.value | Where-Object { $_.file }
@@ -162,8 +149,7 @@ function Remove-AllOldVersions {
     $versions = $resp.value  # newest first
 
     if ($versions.Count -le $KEEP) {
-        Write-Host "  SKIP  $ItemName (already on version 1 only)"
-        return 0
+        return 0  # already clean — silent skip, no output spam
     }
 
     $toDelete = $versions | Select-Object -Skip $KEEP
@@ -267,7 +253,6 @@ foreach ($target in $targets) {
     Write-Host "  Site:    $siteUrl"
     Write-Host "  Library: $libraryName"
 
-    # Skip if LastCleaned has any value, unless -Force is set
     if (-not $Force -and $target.fields.LastCleaned) {
         Write-Host "  SKIPPED - already cleaned on $($target.fields.LastCleaned) (use -Force to rescan)" -ForegroundColor DarkGray
         $totalSkipped++
@@ -282,15 +267,11 @@ foreach ($target in $targets) {
 
         Write-Host "  Scanning files..."
         $files = Get-AllDriveItems -DriveId $driveId -Token $token
-
-        $dirtyFiles = $files | Where-Object { $_.versions -and $_.versions.Count -gt $KEEP }
-        $cleanCount = $files.Count - $dirtyFiles.Count
-
-        Write-Host "  Files: $($files.Count) total  |  $($dirtyFiles.Count) have old versions  |  $cleanCount already clean"
+        Write-Host "  Files found: $($files.Count)"
 
         $totalFiles += $files.Count
 
-        foreach ($file in $dirtyFiles) {
+        foreach ($file in $files) {
             if ($PauseBatchSize -gt 0 -and $dirtyForPause -gt 0 -and ($dirtyForPause % $PauseBatchSize) -eq 0) {
                 Invoke-BatchPause -Minutes $PauseMinutes -FilesProcessed $totalDirty -Token ([ref]$token)
             }
@@ -298,11 +279,14 @@ foreach ($target in $targets) {
             $deleted       = Remove-AllOldVersions -DriveId $driveId -ItemId $file.id -ItemName $file.name `
                                                    -Token $token -DryRun $WhatIf.IsPresent
             $totalDeleted += $deleted
-            $totalDirty++
-            $dirtyForPause++
+            if ($deleted -gt 0) {
+                $totalDirty++
+                $dirtyForPause++
+            }
         }
 
-        # Write LastCleaned back to the config list row (skip in dry run)
+        Write-Host "  Library done - $totalDirty file(s) cleaned so far"
+
         if (-not $WhatIf) {
             Set-LastCleaned -ConfigSiteId $configSiteId -ConfigListId $configListId `
                             -ListItemId $listItemId -Token $token
