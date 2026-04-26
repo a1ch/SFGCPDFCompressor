@@ -161,9 +161,12 @@ function Remove-AllOldVersions {
 
     $deleted = 0
     foreach ($v in $toDelete) {
+        # Version IDs from Graph look like "1.0", "2.0" etc.
+        # The dot must be URL-encoded or Graph returns 400 (interprets it as a file extension)
+        $encodedVersionId = $v.id -replace '\.', '%2E'
         try {
             Invoke-GraphRequest `
-                -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$ItemId/versions/$($v.id)" `
+                -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$ItemId/versions/$encodedVersionId" `
                 -Method DELETE -Headers $headers | Out-Null
             $deleted++
             if ($ThrottleMs -gt 0) { Start-Sleep -Milliseconds $ThrottleMs }

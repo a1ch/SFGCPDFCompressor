@@ -308,14 +308,16 @@ function Remove-OldFileVersions {
     }
 
     foreach ($version in $toDelete) {
-        $versionId = $version.id
+        # Version IDs from Graph look like "1.0", "2.0" etc.
+        # The dot must be URL-encoded or Graph returns 400 (interprets it as a file extension)
+        $encodedVersionId = $version.id -replace '\.', '%2E'
         try {
             Invoke-RestMethod `
-                -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions/$versionId" `
+                -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions/$encodedVersionId" `
                 -Method DELETE `
                 -Headers $headers | Out-Null
         } catch {
-            Write-Warning "  Could not delete version $versionId`: $_"
+            Write-Warning "  Could not delete version $($version.id): $_"
         }
     }
 
@@ -358,7 +360,7 @@ function Write-LogEntry {
         Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $body | Out-Null
         Write-Host "  Log entry written for $FileName"
     } catch {
-        Write-Warning "  Could not write log entry for $FileName`: $_"
+        Write-Warning "  Could not write log entry for $FileName: $_"
     }
 }
 
