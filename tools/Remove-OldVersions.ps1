@@ -108,9 +108,32 @@ function Get-SiteId {
 
 function Get-DriveId {
     param([string]$SiteId, [string]$LibraryName, [string]$Token)
-    $resp  = Invoke-GraphRequest -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers (Get-GraphHeaders $Token)
+    $resp = Invoke-GraphRequest -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers (Get-GraphHeaders $Token)
+
+    # 1. Exact display name match
     $drive = $resp.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
-    if (-not $drive) { throw "Library '$LibraryName' not found on site $SiteId" }
+
+    # 2. Case-insensitive display name match
+    if (-not $drive) {
+        $drive = $resp.value | Where-Object { $_.name -ieq $LibraryName } | Select-Object -First 1
+    }
+
+    # 3. URL path segment match — handles libraries whose display name differs from their internal URL name
+    #    e.g. a library at /sites/FileMagicEng/ASSEM may have display name "Assembly Documents"
+    if (-not $drive) {
+        $drive = $resp.value | Where-Object {
+            try { ([Uri]$_.webUrl).Segments[-1].TrimEnd("/") -ieq $LibraryName } catch { $false }
+        } | Select-Object -First 1
+    }
+
+    if (-not $drive) {
+        $known = ($resp.value | ForEach-Object {
+            $seg = try { ([Uri]$_.webUrl).Segments[-1].TrimEnd("/") } catch { "?" }
+            "'$($_.name)' (url-name: $seg)"
+        }) -join ", "
+        throw "Library '$LibraryName' not found on site $SiteId. Known drives: $known"
+    }
+
     return $drive.id
 }
 
