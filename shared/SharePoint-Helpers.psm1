@@ -108,7 +108,22 @@ function Read-ConfigList {
     $uri   = "https://graph.microsoft.com/v1.0/sites/$siteId/lists/$listId/items?`$expand=fields&`$top=500"
     $items = Invoke-GraphPagedRequest -Uri $uri -Headers $headers
 
-    return $items | Where-Object { $_.fields.Enabled -eq $true }
+    Write-Host "  Read-ConfigList: $($items.Count) total items from Graph"
+
+    # Diagnose the first item's Enabled field type so we can see what Graph is returning
+    if ($items.Count -gt 0) {
+        $sample = $items[0].fields.Enabled
+        Write-Host "  Read-ConfigList: Enabled field sample value='$sample' type=$($sample.GetType().Name)"
+    }
+
+    # Handle both boolean true and integer 1 - Graph API returns Yes/No fields inconsistently
+    $enabled = $items | Where-Object {
+        $val = $_.fields.Enabled
+        $val -eq $true -or $val -eq 1 -or $val -eq "true" -or $val -eq "1" -or $val -eq "Yes"
+    }
+
+    Write-Host "  Read-ConfigList: $($enabled.Count) enabled targets after filter"
+    return $enabled
 }
 
 function Update-TargetLastCompressed {
