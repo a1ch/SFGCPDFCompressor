@@ -71,8 +71,24 @@ function Get-DriveId {
 
     $headers  = Get-GraphHeaders $AccessToken
     $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers $headers
-    $drive    = $response.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
-    if (-not $drive) { throw "Drive/Library '$LibraryName' not found on site $SiteId" }
+
+    # Match on display name first, then fall back to the URL segment
+    # This handles libraries where the config stores the internal URL name
+    # rather than the display name (e.g. "ASSEM" vs "Assembly Documents")
+    $drive = $response.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
+
+    if (-not $drive) {
+        $drive = $response.value | Where-Object {
+            $urlSegment = ($_.webUrl -split '/')[-1]
+            $urlSegment -eq $LibraryName
+        } | Select-Object -First 1
+    }
+
+    if (-not $drive) {
+        $available = ($response.value | ForEach-Object { "$($_.name) [$( ($_.webUrl -split '/')[-1] )]" }) -join ', '
+        throw "Drive/Library '$LibraryName' not found on site $SiteId. Available: $available"
+    }
+
     return $drive.id
 }
 
@@ -174,7 +190,7 @@ function Get-FileMetadata {
         'SMTotalSize', 'SMLastModifiedDate', 'SMTotalFileStreamSize', 'SMTotalFileCount',
         '_ComplianceFlags', '_ComplianceTag', '_ComplianceTagWrittenTime', '_ComplianceTagUserId',
         'AccessPolicy', '_VirusStatus', '_VirusVendorID', '_VirusInfo',
-        'AppAuthorLookupId', 'AppEditorLookupId',
+        'AppAuthorLowupId', 'AppEditorLookupId',
         # Read-only calculated file fields
         'FileSizeDisplay', 'FileSize', 'File_x0020_Size',
         'CheckoutUser', 'CheckedOutUserId', 'IsCheckedoutToLocal',
