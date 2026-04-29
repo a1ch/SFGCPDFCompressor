@@ -16,8 +16,8 @@
 #   .\Remove-OldVersions.ps1 -WhatIf                # dry run (does not write LastCleaned)
 #   .\Remove-OldVersions.ps1 -SiteFilter "FileMagicUK"
 #   .\Remove-OldVersions.ps1 -LibraryFilter "DESIGN_REVIEW"
-#   .\Remove-OldVersions.ps1 -PauseBatchSize 5000 -PauseMinutes 10
-#   .\Remove-OldVersions.ps1 -ThrottleMs 50
+#   .\Remove-OldVersions.ps1 -PauseBatchSize 5000 -PauseMinutes 20
+#   .\Remove-OldVersions.ps1 -ThrottleMs 200
 #
 # Requirements:
 #   - PowerShell 5.1+
@@ -30,10 +30,10 @@ param(
     [string]$SiteFilter    = "",
     [string]$LibraryFilter = "",
 
-    [int]$ThrottleMs     = 50,
+    [int]$ThrottleMs     = 200,
     [int]$MaxRetries     = 5,
     [int]$PauseBatchSize = 5000,
-    [int]$PauseMinutes   = 10
+    [int]$PauseMinutes   = 20
 )
 
 $KEEP = 1
@@ -85,11 +85,11 @@ function Invoke-GraphRequest {
             if ($_.Exception.Response) {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
-            if ($statusCode -eq 429 -and $attempt -lt $Retries) {
-                $retryAfter = 10
+            if (($statusCode -eq 429 -or $statusCode -eq 503) -and $attempt -lt $Retries) {
+                $retryAfter = 30
                 try { $retryAfter = [int]$_.Exception.Response.Headers["Retry-After"] } catch {}
-                if ($retryAfter -lt 1) { $retryAfter = [math]::Pow(2, $attempt + 1) }
-                Write-Warning "  429 Too Many Requests - waiting $retryAfter s before retry ($($attempt+1)/$Retries)..."
+                if ($retryAfter -lt 1) { $retryAfter = [math]::Pow(2, $attempt + 2) }
+                Write-Warning "  $statusCode - waiting $retryAfter s before retry ($($attempt+1)/$Retries)..."
                 Start-Sleep -Seconds $retryAfter
                 $attempt++
             } else {
@@ -119,7 +119,6 @@ function Get-DriveId {
     }
 
     # 3. URL path segment match — handles libraries whose display name differs from their internal URL name
-    #    e.g. a library at /sites/FileMagicEng/ASSEM may have display name "Assembly Documents"
     if (-not $drive) {
         $drive = $resp.value | Where-Object {
             try { ([Uri]$_.webUrl).Segments[-1].TrimEnd("/") -ieq $LibraryName } catch { $false }
@@ -138,7 +137,6 @@ function Get-DriveId {
 }
 
 function Get-AllDriveItems {
-    # Simple file listing — no expand, works on all library types
     param([string]$DriveId, [string]$Token)
     $headers  = Get-GraphHeaders $Token
     $allItems = @()
@@ -161,7 +159,7 @@ function Set-LastCleaned {
         Invoke-GraphRequest -Uri $uri -Method PATCH -Headers (Get-GraphHeaders $Token) -Body $body | Out-Null
         Write-Host "  LastCleaned set: $now" -ForegroundColor DarkGray
     } catch {
-        Write-Warning "  Could not update LastCleaned: $_"
+        Write-Warning ("  Could not update LastCleaned: " + $_)
     }
 }
 
@@ -172,7 +170,7 @@ function Remove-AllOldVersions {
     $versions = $resp.value  # newest first
 
     if ($versions.Count -le $KEEP) {
-        return 0  # already clean — silent skip, no output spam
+        return 0
     }
 
     $toDelete = $versions | Select-Object -Skip $KEEP
@@ -184,8 +182,6 @@ function Remove-AllOldVersions {
 
     $deleted = 0
     foreach ($v in $toDelete) {
-        # Version IDs from Graph look like "1.0", "2.0" etc.
-        # The dot must be URL-encoded or Graph returns 400 (interprets it as a file extension)
         $encodedVersionId = $v.id -replace '\.', '%2E'
         try {
             Invoke-GraphRequest `
@@ -194,7 +190,7 @@ function Remove-AllOldVersions {
             $deleted++
             if ($ThrottleMs -gt 0) { Start-Sleep -Milliseconds $ThrottleMs }
         } catch {
-            Write-Warning "  Could not delete version $($v.id) on $ItemName`: $_"
+            Write-Warning ("  Could not delete version $($v.id) on $ItemName`: " + $_)
         }
     }
 
@@ -319,7 +315,7 @@ foreach ($target in $targets) {
         }
 
     } catch {
-        Write-Warning "  Failed to process '$label': $_"
+        Write-Warning ("  Failed to process '$label': " + $_)
     }
 }
 
