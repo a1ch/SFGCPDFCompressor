@@ -86,7 +86,6 @@ function Get-DriveId {
     } | Select-Object -First 1
 
     if ($matchedList) {
-        # Get the drive for this list
         $drive = $drivesResp.value | Where-Object { $_.name -eq $matchedList.displayName } | Select-Object -First 1
         if ($drive) {
             Write-Host "  Matched '$LibraryName' to library '$($matchedList.displayName)' via internal URL"
@@ -94,9 +93,8 @@ function Get-DriveId {
         }
     }
 
-    # Log available options to help diagnose future issues
-    $availableDrives  = ($drivesResp.value | ForEach-Object { $_.name }) -join ', '
-    $availableLists   = ($listsResp.value | ForEach-Object { "$($_.displayName) [$(($_.webUrl -split '/')[-1])]" }) -join ', '
+    $availableDrives = ($drivesResp.value | ForEach-Object { $_.name }) -join ', '
+    $availableLists  = ($listsResp.value | ForEach-Object { "$($_.displayName) [$(($_.webUrl -split '/')[-1])]" }) -join ', '
     throw "Drive/Library '$LibraryName' not found on site $SiteId.`n  Drive names: $availableDrives`n  List internal names: $availableLists"
 }
 
@@ -172,7 +170,7 @@ function Update-TargetLastCompressed {
         Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null
         Write-Host "  LastCompressed updated for item $ItemId"
     } catch {
-        Write-Warning "  Could not update LastCompressed: $_"
+        Write-Warning ("  Could not update LastCompressed: " + $_)
     }
 }
 
@@ -349,7 +347,7 @@ function Remove-OldFileVersions {
                 -Method DELETE `
                 -Headers $headers | Out-Null
         } catch {
-            Write-Warning "  Could not delete version $($version.id): $_"
+            Write-Warning ("  Could not delete version $($version.id): " + $_)
         }
     }
 
@@ -392,7 +390,7 @@ function Write-LogEntry {
         Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $body | Out-Null
         Write-Host "  Log entry written for $FileName"
     } catch {
-        Write-Warning "  Could not write log entry for $FileName: $_"
+        Write-Warning ("  Could not write log entry for ${FileName}: " + $_)
     }
 }
 
