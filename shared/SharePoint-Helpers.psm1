@@ -69,27 +69,35 @@ function Get-DriveId {
         [string]$AccessToken
     )
 
-    $headers  = Get-GraphHeaders $AccessToken
-    $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers $headers
+    $headers = Get-GraphHeaders $AccessToken
 
-    # Match on display name first, then fall back to the URL segment
-    # This handles libraries where the config stores the internal URL name
-    # rather than the display name (e.g. "ASSEM" vs "Assembly Documents")
-    $drive = $response.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
+    # 1. Try display name match via drives endpoint
+    $drivesResp = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers $headers
+    $drive = $drivesResp.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
+    if ($drive) { return $drive.id }
 
-    if (-not $drive) {
-        $drive = $response.value | Where-Object {
-            $urlSegment = ($_.webUrl -split '/')[-1]
-            $urlSegment -eq $LibraryName
-        } | Select-Object -First 1
+    # 2. Try matching via lists endpoint webUrl internal path segment
+    # The lists endpoint returns webUrl with the actual internal URL name (e.g. /ASSEM)
+    # whereas the drives endpoint returns the display name (e.g. /Assembly%20Sheets)
+    $listsResp = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$select=id,displayName,webUrl&`$filter=list/template eq 'documentLibrary'" -Headers $headers
+    $matchedList = $listsResp.value | Where-Object {
+        $segment = ($_.webUrl -split '/')[-1]
+        $segment -ieq $LibraryName
+    } | Select-Object -First 1
+
+    if ($matchedList) {
+        # Get the drive for this list
+        $drive = $drivesResp.value | Where-Object { $_.name -eq $matchedList.displayName } | Select-Object -First 1
+        if ($drive) {
+            Write-Host "  Matched '$LibraryName' to library '$($matchedList.displayName)' via internal URL"
+            return $drive.id
+        }
     }
 
-    if (-not $drive) {
-        $available = ($response.value | ForEach-Object { "$($_.name) [$( ($_.webUrl -split '/')[-1] )]" }) -join ', '
-        throw "Drive/Library '$LibraryName' not found on site $SiteId. Available: $available"
-    }
-
-    return $drive.id
+    # Log available options to help diagnose future issues
+    $availableDrives  = ($drivesResp.value | ForEach-Object { $_.name }) -join ', '
+    $availableLists   = ($listsResp.value | ForEach-Object { "$($_.displayName) [$(($_.webUrl -split '/')[-1])]" }) -join ', '
+    throw "Drive/Library '$LibraryName' not found on site $SiteId.`n  Drive names: $availableDrives`n  List internal names: $availableLists"
 }
 
 function Invoke-GraphPagedRequest {
@@ -126,7 +134,6 @@ function Read-ConfigList {
 
     Write-Host "  Read-ConfigList: $($items.Count) total items from Graph"
 
-    # Diagnose the first item's Enabled field type so we can see what Graph is returning
     if ($items.Count -gt 0) {
         $sample = $items[0].fields.Enabled
         Write-Host "  Read-ConfigList: Enabled field sample value='$sample' type=$($sample.GetType().Name)"
@@ -190,7 +197,7 @@ function Get-FileMetadata {
         'SMTotalSize', 'SMLastModifiedDate', 'SMTotalFileStreamSize', 'SMTotalFileCount',
         '_ComplianceFlags', '_ComplianceTag', '_ComplianceTagWrittenTime', '_ComplianceTagUserId',
         'AccessPolicy', '_VirusStatus', '_VirusVendorID', '_VirusInfo',
-        'AppAuthorLowupId', 'AppEditorLookupId',
+        'AppAuthorLookupId', 'AppEditorLookupId',
         # Read-only calculated file fields
         'FileSizeDisplay', 'FileSize', 'File_x0020_Size',
         'CheckoutUser', 'CheckedOutUserId', 'IsCheckedoutToLocal',
@@ -271,8 +278,6 @@ function Upload-SharePointFile {
         throw "Failed to create upload session - no uploadUrl returned"
     }
 
-    # Use HttpClient to send raw bytes - Invoke-RestMethod re-encodes byte arrays
-    # causing Content-Length to not match Content-Range
     $httpClient = [System.Net.Http.HttpClient]::new()
 
     $stream = [System.IO.File]::OpenRead($FilePath)
@@ -295,7 +300,6 @@ function Upload-SharePointFile {
             $response   = $httpClient.SendAsync($request).GetAwaiter().GetResult()
             $statusCode = [int]$response.StatusCode
 
-            # 200/201/202 = complete, 206 = accepted chunk, all valid
             if (-not $response.IsSuccessStatusCode -and $statusCode -notin @(200, 201, 202, 206)) {
                 $errBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
                 throw "Upload chunk failed ($statusCode): $errBody"
@@ -330,7 +334,6 @@ function Remove-OldFileVersions {
     $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
     $versions = $response.value
 
-    # versions is ordered newest-first; skip the top $KeepVersions and delete the rest
     $toDelete = $versions | Select-Object -Skip $KeepVersions
 
     if ($toDelete.Count -eq 0) {
@@ -339,8 +342,6 @@ function Remove-OldFileVersions {
     }
 
     foreach ($version in $toDelete) {
-        # Version IDs from Graph look like "1.0", "2.0" etc.
-        # The dot must be URL-encoded or Graph returns 400 (interprets it as a file extension)
         $encodedVersionId = $version.id -replace '\.', '%2E'
         try {
             Invoke-RestMethod `
