@@ -4,7 +4,7 @@ param($Timer)
 # EnqueuePDFs - Timer Trigger
 # Reads a SharePoint list ("SFGCFMCompressor") to find which
 # sites/libraries to process tonight.
-# Skips any row where LastCompressed is already set.
+# Skips any row where LastCompressed was already set TODAY.
 # Recursively scans ALL subfolders in each library.
 # Includes ListId and ListItemId in queue messages so
 # CompressPDFs can preserve column metadata.
@@ -33,6 +33,7 @@ if (-not $configSiteUrl) {
     throw "Missing CONFIG_SITE_URL"
 }
 
+$today   = (Get-Date).ToUniversalTime().Date
 $runDate = (Get-Date).ToString("dddd, MMMM d, yyyy 'at' h:mm tt")
 
 Write-Host "========================================"
@@ -159,10 +160,14 @@ foreach ($target in $targets) {
     Write-Host ""
     Write-Host "--- [$label] $siteUrl / $libraryName ---"
 
+    # Skip only if already compressed TODAY (prevents double-processing, not nightly re-runs)
     if ($lastCompressed) {
-        Write-Host "  SKIPPED - already compressed on $lastCompressed"
-        $skippedCount++
-        continue
+        $lastCompressedDate = ([datetime]$lastCompressed).ToUniversalTime().Date
+        if ($lastCompressedDate -ge $today) {
+            Write-Host "  SKIPPED - already compressed today ($lastCompressed)"
+            $skippedCount++
+            continue
+        }
     }
 
     $targetCount = 0
@@ -206,7 +211,7 @@ $fileLog += "Total queued: $totalQueued files`n"
 Write-Host ""
 Write-Host "========================================"
 Write-Host "Total enqueued: $totalQueued files"
-Write-Host "Skipped (already compressed): $skippedCount"
+Write-Host "Skipped (already compressed today): $skippedCount"
 Write-Host "========================================"
 
 # --- Send summary email with manifest attached ---
