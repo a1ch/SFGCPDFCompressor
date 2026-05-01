@@ -1,6 +1,39 @@
 # SharePoint-Helpers.psm1
 # All SharePoint operations via Microsoft Graph API (Sites.ReadWrite.All)
 
+# Central retry wrapper - handles 429 and 503 with backoff for all Graph calls
+function Invoke-GraphWithRetry {
+    param(
+        [scriptblock]$ScriptBlock,
+        [int]$MaxRetries = 7
+    )
+    $attempt = 0
+    while ($true) {
+        try {
+            return & $ScriptBlock
+        } catch {
+            $statusCode = $null
+            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+            # Also check error message for activityLimitReached
+            $isThrottle = ($statusCode -eq 429 -or $statusCode -eq 503 -or
+                           $_.ToString() -match 'activityLimitReached' -or
+                           $_.ToString() -match 'throttled')
+            if ($isThrottle -and $attempt -lt $MaxRetries) {
+                $retryAfter = 30
+                try { $retryAfter = [int]$_.Exception.Response.Headers['Retry-After'] } catch {}
+                if ($retryAfter -lt 5)  { $retryAfter = 5 }
+                if ($retryAfter -gt 120) { $retryAfter = 120 }
+                $wait = $retryAfter + [math]::Pow(2, $attempt)
+                Write-Warning "  Graph throttled ($statusCode) - waiting $wait s (attempt $($attempt+1)/$MaxRetries)..."
+                Start-Sleep -Seconds $wait
+                $attempt++
+            } else {
+                throw
+            }
+        }
+    }
+}
+
 function Get-SharePointAccessToken {
     param(
         [string]$TenantId,
@@ -43,8 +76,8 @@ function Get-SiteId {
     $host = $uri.Host
     $path = $uri.AbsolutePath.TrimEnd('/')
 
-    $headers  = Get-GraphHeaders $AccessToken
-    $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/${host}:${path}" -Headers $headers
+    $headers = Get-GraphHeaders $AccessToken
+    $response = Invoke-GraphWithRetry { Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/${host}:${path}" -Headers $headers }
     return $response.id
 }
 
@@ -56,7 +89,7 @@ function Get-ListId {
     )
 
     $headers  = Get-GraphHeaders $AccessToken
-    $response = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$filter=displayName eq '$ListName'" -Headers $headers
+    $response = Invoke-GraphWithRetry { Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$filter=displayName eq '$ListName'" -Headers $headers }
     $list     = $response.value | Where-Object { $_.displayName -eq $ListName } | Select-Object -First 1
     if (-not $list) { throw "List '$ListName' not found on site $SiteId" }
     return $list.id
@@ -72,14 +105,12 @@ function Get-DriveId {
     $headers = Get-GraphHeaders $AccessToken
 
     # 1. Try display name match via drives endpoint
-    $drivesResp = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers $headers
+    $drivesResp = Invoke-GraphWithRetry { Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers $headers }
     $drive = $drivesResp.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
     if ($drive) { return $drive.id }
 
     # 2. Try matching via lists endpoint webUrl internal path segment
-    # The lists endpoint returns webUrl with the actual internal URL name (e.g. /ASSEM)
-    # whereas the drives endpoint returns the display name (e.g. /Assembly%20Sheets)
-    $listsResp = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$select=id,displayName,webUrl&`$filter=list/template eq 'documentLibrary'" -Headers $headers
+    $listsResp = Invoke-GraphWithRetry { Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$select=id,displayName,webUrl&`$filter=list/template eq 'documentLibrary'" -Headers $headers }
     $matchedList = $listsResp.value | Where-Object {
         $segment = ($_.webUrl -split '/')[-1]
         $segment -ieq $LibraryName
@@ -108,7 +139,7 @@ function Invoke-GraphPagedRequest {
     $nextUri  = $Uri
 
     do {
-        $response  = Invoke-RestMethod -Uri $nextUri -Headers $Headers -Method GET
+        $response  = Invoke-GraphWithRetry { Invoke-RestMethod -Uri $nextUri -Headers $Headers -Method GET }
         $allItems += $response.value
         $nextUri   = $response.'@odata.nextLink'
     } while ($nextUri)
@@ -167,7 +198,7 @@ function Update-TargetLastCompressed {
 
     $uri = "https://graph.microsoft.com/v1.0/sites/$siteId/lists/$listId/items/$ItemId"
     try {
-        Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null
+        Invoke-GraphWithRetry { Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null }
         Write-Host "  LastCompressed updated for item $ItemId"
     } catch {
         Write-Warning ("  Could not update LastCompressed: " + $_)
@@ -184,7 +215,7 @@ function Get-FileMetadata {
 
     $headers  = Get-GraphHeaders $AccessToken
     $uri      = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId/fields"
-    $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+    $response = Invoke-GraphWithRetry { Invoke-RestMethod -Uri $uri -Headers $headers -Method GET }
 
     # System fields + all known read-only/calculated SharePoint fields
     $systemFields = @(
@@ -235,7 +266,7 @@ function Set-FileMetadata {
     $uri     = "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$ListId/items/$ItemId/fields"
     $body    = $Metadata | ConvertTo-Json -Depth 4
 
-    Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null
+    Invoke-GraphWithRetry { Invoke-RestMethod -Uri $uri -Method PATCH -Headers $headers -Body $body | Out-Null }
     Write-Host "  Metadata restored ($($Metadata.Count) field(s))"
 }
 
@@ -249,7 +280,7 @@ function Download-SharePointFile {
 
     $headers = @{ Authorization = "Bearer $AccessToken" }
     $uri     = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/content"
-    Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $DestinationPath -Method GET
+    Invoke-GraphWithRetry { Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $DestinationPath -Method GET }
 }
 
 function Upload-SharePointFile {
@@ -269,7 +300,7 @@ function Upload-SharePointFile {
     $sessionBody = @{ item = @{ "@microsoft.graph.conflictBehavior" = "replace" } } | ConvertTo-Json
     $headers     = Get-GraphHeaders $AccessToken
 
-    $session   = Invoke-RestMethod -Uri $sessionUri -Method POST -Headers $headers -Body $sessionBody
+    $session   = Invoke-GraphWithRetry { Invoke-RestMethod -Uri $sessionUri -Method POST -Headers $headers -Body $sessionBody }
     $uploadUrl = $session.uploadUrl
 
     if (-not $uploadUrl) {
@@ -329,7 +360,7 @@ function Remove-OldFileVersions {
 
     $headers  = Get-GraphHeaders $AccessToken
     $uri      = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions"
-    $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method GET
+    $response = Invoke-GraphWithRetry { Invoke-RestMethod -Uri $uri -Headers $headers -Method GET }
     $versions = $response.value
 
     $toDelete = $versions | Select-Object -Skip $KeepVersions
@@ -342,10 +373,12 @@ function Remove-OldFileVersions {
     foreach ($version in $toDelete) {
         $encodedVersionId = $version.id -replace '\.', '%2E'
         try {
-            Invoke-RestMethod `
-                -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions/$encodedVersionId" `
-                -Method DELETE `
-                -Headers $headers | Out-Null
+            Invoke-GraphWithRetry {
+                Invoke-RestMethod `
+                    -Uri "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/versions/$encodedVersionId" `
+                    -Method DELETE `
+                    -Headers $headers | Out-Null
+            }
         } catch {
             Write-Warning ("  Could not delete version $($version.id): " + $_)
         }
@@ -387,7 +420,7 @@ function Write-LogEntry {
 
     $uri = "https://graph.microsoft.com/v1.0/sites/$siteId/lists/$listId/items"
     try {
-        Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $body | Out-Null
+        Invoke-GraphWithRetry { Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $body | Out-Null }
         Write-Host "  Log entry written for $FileName"
     } catch {
         Write-Warning ("  Could not write log entry for ${FileName}: " + $_)
