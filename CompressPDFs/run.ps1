@@ -21,6 +21,9 @@ $logSiteUrl   = $env:CONFIG_SITE_URL
 $logListName  = $env:LOG_LIST_NAME ?? "SFGCFMCompressorLog"
 $keepVersions = [int]($env:KEEP_VERSIONS ?? "1")
 
+# Delay between API calls to avoid throttling - no rush, running overnight
+$stepDelaySeconds = [int]($env:STEP_DELAY_SECONDS ?? "5")
+
 # Parse queue message
 $file = $null
 $typeName = $QueueItem.GetType().FullName
@@ -68,6 +71,7 @@ try {
     # 1. Get fresh token for download + metadata
     $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
     Write-Host "Token acquired"
+    Start-Sleep -Seconds $stepDelaySeconds
 
     # 2. Snapshot column metadata BEFORE touching the file
     $metadata = @{}
@@ -79,6 +83,7 @@ try {
         } catch {
             Write-Warning "  Could not read metadata - will proceed but columns may not be preserved: $_"
         }
+        Start-Sleep -Seconds $stepDelaySeconds
     } else {
         Write-Warning "  No ListId/ListItemId in queue message - column metadata will not be preserved"
     }
@@ -90,6 +95,7 @@ try {
 
     $downloadedSize = (Get-Item $tempInput).Length
     Write-Host "Downloaded: $([math]::Round($downloadedSize / 1MB, 2)) MB"
+    Start-Sleep -Seconds $stepDelaySeconds
 
     # 4. Compress (this can take 2-3 minutes - token will expire during this step)
     Write-Host "Compressing..."
@@ -109,11 +115,13 @@ try {
     # 5. Refresh token before upload - compression takes long enough to expire the old one
     Write-Host "Refreshing token before upload..."
     $accessToken = Get-SharePointAccessToken -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+    Start-Sleep -Seconds $stepDelaySeconds
 
     # 6. Upload compressed file back to SharePoint
     Write-Host "Replacing file in SharePoint..."
     Upload-SharePointFile -DriveId $driveId -DriveItemId $driveItemId `
                           -FilePath $tempOutput -AccessToken $accessToken
+    Start-Sleep -Seconds $stepDelaySeconds
 
     # 7. Restore column metadata immediately after upload
     if ($listId -and $listItemId -and $metadata.Count -gt 0) {
@@ -124,10 +132,12 @@ try {
         } catch {
             Write-Warning "  Could not restore metadata: $_"
         }
+        Start-Sleep -Seconds $stepDelaySeconds
     }
 
     Remove-OldFileVersions -DriveId $driveId -DriveItemId $driveItemId `
                            -AccessToken $accessToken -KeepVersions $keepVersions
+    Start-Sleep -Seconds $stepDelaySeconds
 
     Write-Host "Done - saved $savedMB MB"
 
