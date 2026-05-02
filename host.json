@@ -2,11 +2,11 @@
   "version": "2.0",
   "extensions": {
     "queues": {
-      "batchSize": 2,
-      "newBatchThreshold": 1,
+      "batchSize": 1,
+      "newBatchThreshold": 0,
       "maxPollingInterval": "00:02:00",
-      "maxDequeueCount": 5,
-      "visibilityTimeout": "00:10:00"
+      "maxDequeueCount": 10,
+      "visibilityTimeout": "00:20:00"
     }
   },
   "functionTimeout": "01:00:00",
