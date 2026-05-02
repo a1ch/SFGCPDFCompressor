@@ -2,6 +2,7 @@
 # All SharePoint operations via Microsoft Graph API (Sites.ReadWrite.All)
 
 # Central retry wrapper - handles 429 and 503 with backoff for all Graph calls
+# Works for both Invoke-RestMethod and Invoke-WebRequest exceptions
 function Invoke-GraphWithRetry {
     param(
         [scriptblock]$ScriptBlock,
@@ -13,18 +14,33 @@ function Invoke-GraphWithRetry {
             return & $ScriptBlock
         } catch {
             $statusCode = $null
+
+            # Invoke-RestMethod exposes status code via .Exception.Response.StatusCode
             try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
-            # Also check error message for activityLimitReached
+
+            # Invoke-WebRequest throws HttpResponseException - try that too
+            if (-not $statusCode) {
+                try { $statusCode = [int]$_.Exception.Response.StatusCode.value__ } catch {}
+            }
+
+            # Also check string representation for activityLimitReached / throttled
+            $errStr    = $_.ToString()
             $isThrottle = ($statusCode -eq 429 -or $statusCode -eq 503 -or
-                           $_.ToString() -match 'activityLimitReached' -or
-                           $_.ToString() -match 'throttled')
+                           $errStr -match 'activityLimitReached' -or
+                           $errStr -match 'throttled' -or
+                           $errStr -match 'TooManyRequests' -or
+                           $errStr -match '429')
+
             if ($isThrottle -and $attempt -lt $MaxRetries) {
+                # Try to read Retry-After from response header
                 $retryAfter = 30
-                try { $retryAfter = [int]$_.Exception.Response.Headers['Retry-After'] } catch {}
-                if ($retryAfter -lt 5)  { $retryAfter = 5 }
+                try { $retryAfter = [int]$_.Exception.Response.Headers.GetValues('Retry-After')[0] } catch {}
+                try { if (-not $retryAfter) { $retryAfter = [int]$_.Exception.Response.Headers['Retry-After'] } } catch {}
+                if ($retryAfter -lt 5)   { $retryAfter = 5 }
                 if ($retryAfter -gt 120) { $retryAfter = 120 }
+
                 $wait = $retryAfter + [math]::Pow(2, $attempt)
-                Write-Warning "  Graph throttled ($statusCode) - waiting $wait s (attempt $($attempt+1)/$MaxRetries)..."
+                Write-Warning "  Graph throttled ($statusCode) - waiting ${wait}s before retry (attempt $($attempt+1)/$MaxRetries)..."
                 Start-Sleep -Seconds $wait
                 $attempt++
             } else {
@@ -227,7 +243,6 @@ function Get-FileMetadata {
         '_ComplianceFlags', '_ComplianceTag', '_ComplianceTagWrittenTime', '_ComplianceTagUserId',
         'AccessPolicy', '_VirusStatus', '_VirusVendorID', '_VirusInfo',
         'AppAuthorLookupId', 'AppEditorLookupId',
-        # Read-only calculated file fields
         'FileSizeDisplay', 'FileSize', 'File_x0020_Size',
         'CheckoutUser', 'CheckedOutUserId', 'IsCheckedoutToLocal',
         'UniqueId', 'SyncClientId', 'ProgId', 'ScopeId',
@@ -280,7 +295,12 @@ function Download-SharePointFile {
 
     $headers = @{ Authorization = "Bearer $AccessToken" }
     $uri     = "https://graph.microsoft.com/v1.0/drives/$DriveId/items/$DriveItemId/content"
-    Invoke-GraphWithRetry { Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $DestinationPath -Method GET }
+
+    # Use Invoke-GraphWithRetry - note: Invoke-WebRequest throws HttpResponseException
+    # which the retry wrapper now handles correctly via StatusCode.value__
+    Invoke-GraphWithRetry {
+        Invoke-WebRequest -Uri $uri -Headers $headers -OutFile $DestinationPath -Method GET
+    }
 }
 
 function Upload-SharePointFile {
