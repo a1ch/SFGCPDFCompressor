@@ -1,0 +1,36 @@
+# Nightly scheduler - triggers EnqueuePDFs via HTTP since Azure Consumption plan
+# timer triggers are unreliable and can go dormant.
+#
+# Required GitHub secrets:
+#   ENQUEUE_INVOKE_URL  - https://sfgcpdfcompressor4.azurewebsites.net/admin/functions/EnqueuePDFs
+#   ENQUEUE_HOST_KEY    - master key from sfgcpdfcompressor4 Host Keys in Azure portal
+
+name: Nightly PDF Compressor Trigger
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 2:00 AM UTC every night
+  workflow_dispatch:       # allows manual trigger from GitHub Actions tab
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger EnqueuePDFs
+        run: |
+          echo "Triggering EnqueuePDFs at $(date -u)"
+          response=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            -X POST \
+            -H "x-functions-key: ${{ secrets.ENQUEUE_HOST_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"input": ""}' \
+            "${{ secrets.ENQUEUE_INVOKE_URL }}")
+          echo "HTTP status: $response"
+          cat /tmp/response.txt
+          if [ "$response" -ge 200 ] && [ "$response" -lt 300 ]; then
+            echo "EnqueuePDFs triggered successfully"
+          else
+            echo "Trigger failed with HTTP $response"
+            exit 1
+          fi
