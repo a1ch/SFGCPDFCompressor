@@ -120,23 +120,34 @@ function Get-DriveId {
 
     $headers = Get-GraphHeaders $AccessToken
 
-    # 1. Try display name match via drives endpoint
+    # 1. Try exact display name match via drives endpoint (fastest path)
     $drivesResp = Invoke-GraphWithRetry { Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/drives" -Headers $headers }
     $drive = $drivesResp.value | Where-Object { $_.name -eq $LibraryName } | Select-Object -First 1
-    if ($drive) { return $drive.id }
+    if ($drive) {
+        Write-Host "  Matched '$LibraryName' by drive display name"
+        return $drive.id
+    }
 
-    # 2. Try matching via lists endpoint webUrl internal path segment
+    # 2. Fall back: find the list by URL segment OR display name, then get its drive by list ID.
+    #    This handles cases where the drive name differs from the list display name
+    #    (e.g. drive="Other", list display="Others", URL segment="OTHER")
     $listsResp = Invoke-GraphWithRetry { Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists?`$select=id,displayName,webUrl&`$filter=list/template eq 'documentLibrary'" -Headers $headers }
+
     $matchedList = $listsResp.value | Where-Object {
         $segment = ($_.webUrl -split '/')[-1]
-        $segment -ieq $LibraryName
+        $segment -ieq $LibraryName -or $_.displayName -ieq $LibraryName
     } | Select-Object -First 1
 
     if ($matchedList) {
-        $drive = $drivesResp.value | Where-Object { $_.name -eq $matchedList.displayName } | Select-Object -First 1
-        if ($drive) {
-            Write-Host "  Matched '$LibraryName' to library '$($matchedList.displayName)' via internal URL"
-            return $drive.id
+        # Look up the drive using the list's own ID - this is the reliable link
+        try {
+            $driveResp = Invoke-GraphWithRetry { Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/sites/$SiteId/lists/$($matchedList.id)/drive" -Headers $headers }
+            if ($driveResp.id) {
+                Write-Host "  Matched '$LibraryName' to list '$($matchedList.displayName)' [$(($matchedList.webUrl -split '/')[-1])] via list ID -> drive"
+                return $driveResp.id
+            }
+        } catch {
+            Write-Warning "  Could not get drive for list '$($matchedList.displayName)': $_"
         }
     }
 
