@@ -4,8 +4,8 @@
       "name": "Timer",
       "type": "timerTrigger",
       "direction": "in",
-      "schedule": "0 0 22 * * *",
-      "runOnStartup": false
+      "schedule": "0 0 2 * * *",
+      "runOnStartup": true
     },
     {
       "name": "outputQueue",
