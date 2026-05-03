@@ -9,7 +9,6 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_NAME: 'sfgcpdfcompressor4'
-  AZURE_RESOURCE_GROUP: 'SFGC_SP_Automation'
   IMAGE_NAME: sfgcpdfcompressor
 
 jobs:
@@ -36,9 +35,7 @@ jobs:
             --tag ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
             . 2>&1
 
-      - name: Deploy to Azure Function App
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE }}
-          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+      - name: Trigger Azure redeploy via webhook
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.AZURE_WEBHOOK_URL }}"
