@@ -35,3 +35,18 @@ jobs:
             --push \
             --tag ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
             . 2>&1
+
+      - name: Notify Azure to pull new image
+        run: |
+          echo "Firing ACR webhook to trigger Azure container refresh..."
+          response=$(curl -s -o /tmp/webhook_response.txt -w "%{http_code}" \
+            -X POST \
+            "${{ secrets.ACR_WEBHOOK_URL }}")
+          echo "HTTP status: $response"
+          cat /tmp/webhook_response.txt
+          if [ "$response" -ge 200 ] && [ "$response" -lt 300 ]; then
+            echo "Webhook fired successfully - Azure will pull new image shortly"
+          else
+            echo "Webhook call failed with HTTP $response"
+            exit 1
+          fi
