@@ -4,7 +4,7 @@
       "name": "Timer",
       "type": "timerTrigger",
       "direction": "in",
-      "schedule": "0 25 21 * * *",
+      "schedule": "0 0 8 * * *",
       "runOnStartup": false
     },
     {
