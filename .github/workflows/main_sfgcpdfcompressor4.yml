@@ -37,5 +37,9 @@ jobs:
 
       - name: Trigger Azure redeploy via webhook
         run: |
-          curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ secrets.AZURE_WEBHOOK_URL }}"
+          HTTP_STATUS=$(curl -s -o /tmp/webhook_response.txt -w "%{http_code}" \
+            -X POST \
+            --user "${{ secrets.AZURE_WEBHOOK_USER }}:${{ secrets.AZURE_WEBHOOK_PASS }}" \
+            "https://sfgcpdfcompressor4-d6exdsg0bxgngjcz.scm.canadacentral-01.azurewebsites.net/api/registry/webhook")
+          echo "HTTP status: $HTTP_STATUS"
+          cat /tmp/webhook_response.txt
