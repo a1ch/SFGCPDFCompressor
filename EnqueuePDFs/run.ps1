@@ -8,8 +8,7 @@ param($Timer)
 # Recursively scans ALL subfolders in each library.
 # Includes ListId and ListItemId in queue messages so
 # CompressPDFs can preserve column metadata.
-# After scanning each library, writes LastCompressed back to
-# the control list row.
+# Only stamps LastCompressed if at least 1 file was queued.
 # Sends a summary email with a queued file manifest attached.
 # ============================================================
 
@@ -187,11 +186,17 @@ foreach ($target in $targets) {
         Write-Host "  Done - enqueued $targetCount file(s)"
         $totalQueued += $targetCount
 
-        Update-TargetLastCompressed `
-            -SiteUrl     $configSiteUrl `
-            -ListName    $configListName `
-            -AccessToken $accessToken `
-            -ItemId      $itemId
+        # Only stamp LastCompressed if we actually queued something - 
+        # avoids blocking future runs when a library has no qualifying files tonight
+        if ($targetCount -gt 0) {
+            Update-TargetLastCompressed `
+                -SiteUrl     $configSiteUrl `
+                -ListName    $configListName `
+                -AccessToken $accessToken `
+                -ItemId      $itemId
+        } else {
+            Write-Host "  No files queued for this library - LastCompressed not updated"
+        }
 
         $targetSummaries += @{
             Label       = $label
