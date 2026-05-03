@@ -34,12 +34,3 @@ jobs:
             --push \
             --tag ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
             . 2>&1
-
-      - name: Trigger Azure redeploy via webhook
-        run: |
-          HTTP_STATUS=$(curl -s -o /tmp/webhook_response.txt -w "%{http_code}" \
-            -X POST \
-            --user "${{ secrets.AZURE_WEBHOOK_USER }}:${{ secrets.AZURE_WEBHOOK_PASS }}" \
-            "https://sfgcpdfcompressor4-d6exdsg0bxgngjcz.scm.canadacentral-01.azurewebsites.net/api/registry/webhook")
-          echo "HTTP status: $HTTP_STATUS"
-          cat /tmp/webhook_response.txt
