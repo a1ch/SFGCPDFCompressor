@@ -19,11 +19,13 @@
 - requirements.txt - pymupdf, img2pdf, Pillow, requests, azure-functions
 
 ### Deployed Function App
-- The live deployed app is **sfgcpdfcompressor4** (not 2 or 3)
+- The live deployed app is **sfgcpdfcompressor5** (not 4)
+- URL: sfgcpdfcompressor5-agagcccrhje8g7et.canadacentral-01.azurewebsites.net
 - Resource group: **SFGC_SP_Automation**
-- ACR: sfgccompressor3containerregistry.azurecr.io (no longer used)
-- GitHub Actions workflow: main_sfgcpdfcompressor4.yml
-- Deploys automatically on push to main via zip deploy (NOT Docker)
+- GitHub Actions workflow: main_sfgcpdfcompressor5.yml
+- Deploys automatically on push to main via zip deploy
+- WEBSITE_RUN_FROM_PACKAGE=0 (writeable wwwroot)
+- SCM enabled
 
 ### Azure Access
 - Shawn cannot access Azure directly - must use Citrix
@@ -42,6 +44,3 @@
 - Get-DriveId matches on URL segment as fallback for this reason
 - Timer is 23:15 UTC (6:15pm Mountain) with runOnStartup true
 - Min 10% reduction threshold before replacing file
-
-### Trigger deploy note
-- Last deploy trigger: 2026-05-04 00:15 UTC
