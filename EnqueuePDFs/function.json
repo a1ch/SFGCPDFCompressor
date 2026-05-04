@@ -5,8 +5,7 @@
       "name": "mytimer",
       "type": "timerTrigger",
       "direction": "in",
-      "schedule": "0 0 1 * * *",
-      "runOnStartup": true
+      "schedule": "0 0 8 * * *"
     },
     {
       "name": "outputQueue",
