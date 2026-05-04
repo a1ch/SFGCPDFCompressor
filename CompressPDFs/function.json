@@ -1,12 +1,1 @@
-{
-  "scriptFile": "__init__.py",
-  "bindings": [
-    {
-      "name": "msg",
-      "type": "queueTrigger",
-      "direction": "in",
-      "queueName": "pdf-compress-queue",
-      "connection": "AzureWebJobsStorage"
-    }
-  ]
-}
+# retired - app uses function_app.py v2 model

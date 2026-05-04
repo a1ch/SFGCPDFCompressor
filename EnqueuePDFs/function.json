@@ -1,18 +1,1 @@
-{
-  "scriptFile": "__init__.py",
-  "bindings": [
-    {
-      "name": "mytimer",
-      "type": "timerTrigger",
-      "direction": "in",
-      "schedule": "0 15 1 * * *"
-    },
-    {
-      "name": "outputQueue",
-      "type": "queue",
-      "direction": "out",
-      "queueName": "pdf-compress-queue",
-      "connection": "AzureWebJobsStorage"
-    }
-  ]
-}
+# retired - app uses function_app.py v2 model
