@@ -19,9 +19,9 @@
 - requirements.txt - pymupdf, img2pdf, Pillow, requests, azure-functions
 
 ### Deployed Function App
-- The live deployed app is **sfgcpdfcompressor5** (not 4)
+- The live deployed app is **sfgcpdfcompressor5**
 - URL: sfgcpdfcompressor5-agagcccrhje8g7et.canadacentral-01.azurewebsites.net
-- Resource group: **SFGC_SP_Automation**
+- Resource group: **sfgcpdfcompressor5_group**
 - GitHub Actions workflow: main_sfgcpdfcompressor5.yml
 - Deploys automatically on push to main via zip deploy
 - WEBSITE_RUN_FROM_PACKAGE=0 (writeable wwwroot)
@@ -30,7 +30,7 @@
 ### Azure Access
 - Shawn cannot access Azure directly - must use Citrix
 - Shawn CAN use Azure Cloud Shell (the terminal in the portal) to run az commands
-- Always give az commands with --resource-group SFGC_SP_Automation
+- Always give az commands with --resource-group sfgcpdfcompressor5_group
 
 ### Remove-OldVersions.ps1
 - Located at: C:\Users\ShawnStubbs\Claude\SFGCPDFCompressor\tools\Remove-OldVersions.ps1
@@ -42,5 +42,5 @@
 - EnqueuePDFs skips libraries where LastCompressed was set TODAY (not ever) - runs nightly
 - LibraryName in config list stores the URL internal name, not the display name
 - Get-DriveId matches on URL segment as fallback for this reason
-- Timer is 23:15 UTC (6:15pm Mountain) with runOnStartup true
+- Timer is 23:45 UTC (6:45pm Mountain) with runOnStartup true
 - Min 10% reduction threshold before replacing file
