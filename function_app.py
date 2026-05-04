@@ -21,7 +21,7 @@ def logerr(msg):
     logging.error(msg)
 
 
-@app.timer_trigger(schedule="0 15 1 * * *", arg_name="mytimer", run_on_startup=False)
+@app.timer_trigger(schedule="0 30 1 * * *", arg_name="mytimer", run_on_startup=False)
 @app.queue_output(arg_name="outputQueue", queue_name="pdf-compress-queue", connection="AzureWebJobsStorage")
 def EnqueuePDFs(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     now_utc = datetime.now(timezone.utc)
