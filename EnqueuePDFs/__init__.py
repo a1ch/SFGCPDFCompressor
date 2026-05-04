@@ -1,8 +1,4 @@
 # EnqueuePDFs - Timer Trigger
-# Reads the SFGCFMCompressor SharePoint list to find which sites/libraries
-# to process tonight. Skips any row where LastCompressed was set TODAY.
-# Recursively scans ALL subfolders. Sends a summary email with manifest.
-
 import os
 import json
 import logging
@@ -16,6 +12,13 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     run_date = now_utc.strftime("%A, %B %d, %Y at %H:%M UTC")
     today = now_utc.date()
 
+    logging.info("========================================")
+    logging.info(">>> EnqueuePDFs TRIGGERED")
+    logging.info(f">>> Time: {run_date}")
+    if mytimer.past_due:
+        logging.warning(">>> Timer is past due - running late")
+    logging.info("========================================")
+
     tenant_id     = os.environ["TENANT_ID"]
     client_id     = os.environ["CLIENT_ID"]
     client_secret = os.environ["CLIENT_SECRET"]
@@ -27,23 +30,29 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     test_limit    = int(os.environ.get("TEST_LIMIT", "5"))
     global_min_mb = float(os.environ.get("MIN_SIZE_MB", "5"))
 
-    logging.info("========================================")
-    logging.info("EnqueuePDFs starting")
     logging.info(f"Config site:  {config_site}")
     logging.info(f"Config list:  {config_list}")
     logging.info(f"Test Mode:    {test_mode} (limit: {test_limit})")
     logging.info(f"Global Min:   {global_min_mb} MB")
-    logging.info(f"Run date:     {run_date}")
-    logging.info("========================================")
 
-    token = graph.get_token(tenant_id, client_id, client_secret)
-    logging.info("Authenticated to Graph API")
+    try:
+        logging.info("Authenticating to Graph API...")
+        token = graph.get_token(tenant_id, client_id, client_secret)
+        logging.info(">>> Authentication successful")
+    except Exception as e:
+        logging.error(f">>> FATAL: Authentication failed: {e}")
+        raise
 
-    targets = graph.read_config_list(config_site, config_list, token)
-    logging.info(f"Found {len(targets)} enabled target(s)")
+    try:
+        logging.info(f"Reading config list '{config_list}'...")
+        targets = graph.read_config_list(config_site, config_list, token)
+        logging.info(f">>> Found {len(targets)} enabled target(s)")
+    except Exception as e:
+        logging.error(f">>> FATAL: Could not read config list: {e}")
+        raise
 
     if not targets:
-        logging.info("No enabled targets - nothing to do.")
+        logging.info(">>> No enabled targets - nothing to do. Exiting.")
         return
 
     total_queued = 0
@@ -68,9 +77,8 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
         min_mb       = float(fields.get("MinSizeMB") or 0) or global_min_mb
         min_bytes    = int(min_mb * 1024 * 1024)
 
-        logging.info(f"--- [{label}] {site_url} / {library_name} ---")
+        logging.info(f"--- Processing [{label}] {site_url} / {library_name} ---")
 
-        # Skip if already compressed today
         if last_compressed:
             try:
                 lc_date = datetime.fromisoformat(last_compressed.rstrip("Z")).date()
@@ -78,17 +86,26 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
                     logging.info(f"  SKIPPED - already compressed today ({last_compressed})")
                     skipped_count += 1
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"  Could not parse LastCompressed '{last_compressed}': {e}")
 
-        target_count = 0
         target_messages = []
         done = [False]
 
         try:
+            logging.info(f"  Getting site ID for {site_url}...")
             site_id  = graph.get_site_id(site_url, token)
+            logging.info(f"  site_id: {site_id}")
+
+            logging.info(f"  Getting drive ID for library '{library_name}'...")
             drive_id = graph.get_drive_id(site_id, library_name, token)
+            logging.info(f"  drive_id: {drive_id}")
+
+            logging.info(f"  Getting list ID for '{library_name}'...")
             list_id  = graph.get_list_id(site_id, library_name, token)
+            logging.info(f"  list_id: {list_id}")
+
+            logging.info(f"  Scanning folders for PDFs > {min_mb} MB...")
 
             def scan_folder(folder_url):
                 uri = folder_url
@@ -108,6 +125,7 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
 
                         size_mb = round(item["size"] / 1024 / 1024, 2)
                         list_item_id = (item.get("listItem") or {}).get("id")
+                        logging.info(f"  Queuing: {item['name']} ({size_mb} MB)")
 
                         msg = json.dumps({
                             "DriveItemId": item["id"],
@@ -135,11 +153,12 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
 
             target_count = len(target_messages)
             messages.extend(target_messages)
-
-            logging.info(f"  Done - enqueued {target_count} file(s)")
             total_queued += target_count
 
+            logging.info(f"  >>> Enqueued {target_count} file(s) for [{label}]")
+
             if target_count > 0:
+                logging.info("  Refreshing token before updating LastCompressed...")
                 token = graph.get_token(tenant_id, client_id, client_secret)
                 graph.update_last_compressed(config_site, config_list, item_id, token)
             else:
@@ -153,9 +172,11 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
             })
 
         except Exception as e:
-            logging.warning(f"  Failed for [{label}]: {e}")
+            logging.error(f"  >>> ERROR processing [{label}]: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
 
-    # Push all messages to queue
+    logging.info(f"Pushing {len(messages)} message(s) to queue...")
     for msg in messages:
         outputQueue.set(msg)
 
@@ -163,11 +184,14 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     file_log_lines.append(f"Total queued: {total_queued} files")
     file_log = "\n".join(file_log_lines)
 
-    logging.info(f"Total enqueued: {total_queued} files")
-    logging.info(f"Skipped (already compressed today): {skipped_count}")
+    logging.info("========================================")
+    logging.info(f">>> EnqueuePDFs COMPLETE")
+    logging.info(f">>> Total enqueued: {total_queued} files")
+    logging.info(f">>> Skipped (already compressed today): {skipped_count}")
+    logging.info("========================================")
 
-    # Send summary email
     try:
+        logging.info("Sending summary email...")
         token = graph.get_token(tenant_id, client_id, client_secret)
         html = graph.build_summary_email_html(len(targets), total_queued, target_summaries, run_date)
         attach_name = f"queued-files-{now_utc.strftime('%Y-%m-%d')}.txt"
@@ -178,5 +202,6 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
             attachment_name=attach_name,
             attachment_content=file_log
         )
+        logging.info(">>> Summary email sent")
     except Exception as e:
-        logging.warning(f"Could not send summary email: {e}")
+        logging.error(f">>> ERROR sending summary email: {e}")
