@@ -12,8 +12,9 @@ from shared import graph
 
 
 def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
-    run_date = datetime.now(timezone.utc).strftime("%A, %B %-d, %Y at %-I:%M %p")
-    today = datetime.now(timezone.utc).date()
+    now_utc = datetime.now(timezone.utc)
+    run_date = now_utc.strftime("%A, %B %d, %Y at %H:%M UTC")
+    today = now_utc.date()
 
     tenant_id     = os.environ["TENANT_ID"]
     client_id     = os.environ["CLIENT_ID"]
@@ -25,7 +26,6 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     test_mode     = os.environ.get("TEST_MODE", "").lower() == "true"
     test_limit    = int(os.environ.get("TEST_LIMIT", "5"))
     global_min_mb = float(os.environ.get("MIN_SIZE_MB", "5"))
-    step_delay    = float(os.environ.get("STEP_DELAY_MS", "200")) / 1000
 
     logging.info("========================================")
     logging.info("EnqueuePDFs starting")
@@ -49,7 +49,13 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     total_queued = 0
     target_summaries = []
     skipped_count = 0
-    file_log = f"SFGCPDFCompressor - Queued File Manifest\nRun: {run_date}\n" + "=" * 80 + "\nFile\tSize\tLibrary\tSite\n" + "-" * 80 + "\n"
+    file_log_lines = [
+        "SFGCPDFCompressor - Queued File Manifest",
+        f"Run: {run_date}",
+        "=" * 80,
+        "File\tSize\tLibrary\tSite",
+        "-" * 80,
+    ]
     messages = []
 
     for target in targets:
@@ -76,7 +82,8 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
                 pass
 
         target_count = 0
-        done = False
+        target_messages = []
+        done = [False]
 
         try:
             site_id  = graph.get_site_id(site_url, token)
@@ -84,12 +91,11 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
             list_id  = graph.get_list_id(site_id, library_name, token)
 
             def scan_folder(folder_url):
-                nonlocal done, target_count
                 uri = folder_url
                 while uri:
                     data = graph.graph_get(uri, token).json()
                     for item in data.get("value", []):
-                        if done:
+                        if done[0]:
                             return
                         if "folder" in item:
                             sub_uri = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item['id']}/children?$select=id,name,size,folder,listItem&$expand=listItem($select=id)&$top=500"
@@ -114,15 +120,12 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
                             "SiteUrl":     site_url,
                             "LibraryName": library_name
                         })
-                        messages.append(msg)
-                        target_count += 1
+                        target_messages.append(msg)
+                        file_log_lines.append(f"{item['name']}\t{size_mb} MB\t{library_name}\t{site_url}")
 
-                        nonlocal file_log
-                        file_log += f"{item['name']}\t{size_mb} MB\t{library_name}\t{site_url}\n"
-
-                        if test_mode and target_count >= test_limit:
+                        if test_mode and len(target_messages) >= test_limit:
                             logging.info(f"  TEST MODE: Reached limit of {test_limit} files")
-                            done = True
+                            done[0] = True
                             return
 
                     uri = data.get("@odata.nextLink")
@@ -130,11 +133,13 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
             root_uri = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/children?$select=id,name,size,folder,listItem&$expand=listItem($select=id)&$top=500"
             scan_folder(root_uri)
 
+            target_count = len(target_messages)
+            messages.extend(target_messages)
+
             logging.info(f"  Done - enqueued {target_count} file(s)")
             total_queued += target_count
 
             if target_count > 0:
-                # Refresh token before updating SharePoint
                 token = graph.get_token(tenant_id, client_id, client_secret)
                 graph.update_last_compressed(config_site, config_list, item_id, token)
             else:
@@ -154,7 +159,9 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     for msg in messages:
         outputQueue.set(msg)
 
-    file_log += "-" * 80 + f"\nTotal queued: {total_queued} files\n"
+    file_log_lines.append("-" * 80)
+    file_log_lines.append(f"Total queued: {total_queued} files")
+    file_log = "\n".join(file_log_lines)
 
     logging.info(f"Total enqueued: {total_queued} files")
     logging.info(f"Skipped (already compressed today): {skipped_count}")
@@ -163,10 +170,10 @@ def main(mytimer: func.TimerRequest, outputQueue: func.Out[str]) -> None:
     try:
         token = graph.get_token(tenant_id, client_id, client_secret)
         html = graph.build_summary_email_html(len(targets), total_queued, target_summaries, run_date)
-        attach_name = f"queued-files-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.txt"
+        attach_name = f"queued-files-{now_utc.strftime('%Y-%m-%d')}.txt"
         graph.send_summary_email(
             token, summary_from, summary_to,
-            subject=f"PDF Compressor - Nightly Run {datetime.now(timezone.utc).strftime('%Y-%m-%d')} - {total_queued} files queued",
+            subject=f"PDF Compressor - Nightly Run {now_utc.strftime('%Y-%m-%d')} - {total_queued} files queued",
             html_body=html,
             attachment_name=attach_name,
             attachment_content=file_log
