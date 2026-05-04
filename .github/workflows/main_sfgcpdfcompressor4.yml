@@ -1,5 +1,5 @@
-# Deploy to sfgcpdfcompressor4 (Container Image mode)
-name: Build and deploy Docker image to Azure Function App - sfgcpdfcompressor4
+# Deploy to sfgcpdfcompressor4 (Pure Python zip deploy)
+name: Build and deploy Python app to Azure Function App - sfgcpdfcompressor4
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_NAME: 'sfgcpdfcompressor4'
-  IMAGE_NAME: sfgcpdfcompressor
+  PYTHON_VERSION: '3.11'
 
 jobs:
   build-and-deploy:
@@ -19,36 +19,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Log in to Azure Container Registry
-        uses: docker/login-action@v3
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          registry: ${{ secrets.ACR_LOGIN_SERVER }}
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Build and push Docker image
+      - name: Install dependencies
         run: |
-          docker buildx build \
-            --no-cache \
-            --progress=plain \
-            --provenance=false \
-            --push \
-            --tag ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest \
-            . 2>&1
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
-      - name: Notify Azure to pull new image
-        env:
-          WEBHOOK_URL: ${{ secrets.ACR_WEBHOOK_URL }}
-        run: |
-          echo "Firing ACR webhook to trigger Azure container refresh..."
-          response=$(curl -s -o /tmp/webhook_response.txt -w "%{http_code}" \
-            -X POST \
-            "$WEBHOOK_URL")
-          echo "HTTP status: $response"
-          cat /tmp/webhook_response.txt
-          if [ "$response" -ge 200 ] && [ "$response" -lt 300 ]; then
-            echo "Webhook fired successfully - Azure will pull new image shortly"
-          else
-            echo "Webhook call failed with HTTP $response"
-            exit 1
-          fi
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: .
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false
