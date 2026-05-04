@@ -40,5 +40,8 @@
 - EnqueuePDFs skips libraries where LastCompressed was set TODAY (not ever) - runs nightly
 - LibraryName in config list stores the URL internal name, not the display name
 - Get-DriveId matches on URL segment as fallback for this reason
-- Timer is 00:00 UTC (6pm Mountain) with runOnStartup true
+- Timer is 23:15 UTC (6:15pm Mountain) with runOnStartup true
 - Min 10% reduction threshold before replacing file
+
+### Trigger deploy note
+- Last deploy trigger: 2026-05-04 00:15 UTC
