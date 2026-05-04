@@ -1,8 +1,5 @@
 {
   "version": "2.0",
-  "managedDependency": {
-    "enabled": false
-  },
   "extensions": {
     "queues": {
       "batchSize": 1,

@@ -1,7 +1,8 @@
 {
+  "scriptFile": "__init__.py",
   "bindings": [
     {
-      "name": "QueueItem",
+      "name": "msg",
       "type": "queueTrigger",
       "direction": "in",
       "queueName": "pdf-compress-queue",

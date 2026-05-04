@@ -1,0 +1,5 @@
+pymupdf
+img2pdf
+Pillow
+requests
+azure-functions
