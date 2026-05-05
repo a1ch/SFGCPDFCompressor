@@ -1,34 +1,11 @@
-# Deploy to sfgcpdfcompressor5 (Pure Python zip deploy)
-name: Build and deploy Python app to Azure Function App - sfgcpdfcompressor5
+# DISABLED - retired, all deploys now go through SFGCPDFCompressorPy repo
+name: DISABLED - sfgcpdfcompressor5
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
-env:
-  AZURE_FUNCTIONAPP_NAME: 'sfgcpdfcompressor5'
-  PYTHON_VERSION: '3.11'
-
 jobs:
-  build-and-deploy:
+  disabled:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Deploy to Azure Functions
-        uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: .
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
+      - run: echo "This workflow is disabled - use SFGCPDFCompressorPy repo"
